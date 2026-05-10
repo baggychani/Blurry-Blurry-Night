@@ -27,9 +27,9 @@ const BLUR_MAX = 30;
 
 /** 접힘/펼침 모두 동일 — 새 사진·저장 버튼 공통 스타일 */
 const PRIMARY_BTN_NEW =
-  "flex items-center justify-center gap-2 rounded-xl py-2 px-4 text-sm font-medium transition-all duration-150 active:scale-95 bg-zinc-800 hover:bg-zinc-700 text-white disabled:opacity-40 disabled:cursor-not-allowed";
+  "flex items-center justify-center gap-2 rounded-xl min-h-[2.75rem] py-2 px-4 text-sm font-medium transition-all duration-150 active:scale-95 bg-zinc-800 hover:bg-zinc-700 text-white disabled:opacity-40 disabled:cursor-not-allowed";
 const PRIMARY_BTN_SAVE =
-  "flex items-center justify-center gap-2 rounded-xl py-2 px-4 text-sm font-semibold transition-all duration-150 active:scale-95 bg-white hover:bg-zinc-100 text-black disabled:opacity-40 disabled:cursor-not-allowed";
+  "flex items-center justify-center gap-2 rounded-xl min-h-[2.75rem] py-2 px-4 text-sm font-semibold transition-all duration-150 active:scale-95 bg-white hover:bg-zinc-100 text-black disabled:opacity-40 disabled:cursor-not-allowed";
 
 function PrimaryActionRow({
   isProcessing,
@@ -272,7 +272,7 @@ export default function BottomSheet({
             </div>
 
             {/* 탭 초점 + 거리 맵 */}
-            <div className="grid grid-cols-2 gap-2 mb-2">
+            <div className="grid grid-cols-2 gap-2 mb-3">
               <button
                 type="button"
                 onClick={onTapFocusModeToggle}
@@ -280,7 +280,7 @@ export default function BottomSheet({
                 title={tapFocusMode ? "탭 초점 끄기 (비교 슬라이더)" : "탭으로 초점 맞추기"}
                 className={`
                   min-h-[2.75rem] flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2
-                  text-xs font-medium rounded-xl py-2 px-2 sm:px-3 text-center leading-tight
+                  text-[13px] font-medium rounded-xl py-2 px-2 sm:px-3 text-center leading-tight
                   transition-all duration-150 disabled:opacity-40
                   ${
                     tapFocusMode
@@ -315,7 +315,7 @@ export default function BottomSheet({
                 title={maskMode ? "거리 맵 확인 종료" : "거리 맵 확인"}
                 className={`
                   min-h-[2.75rem] flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2
-                  text-xs font-medium rounded-xl py-2 px-2 sm:px-3 text-center leading-tight
+                  text-[13px] font-medium rounded-xl py-2 px-2 sm:px-3 text-center leading-tight
                   transition-all duration-150 disabled:opacity-40
                   ${
                     maskMode
@@ -354,7 +354,7 @@ export default function BottomSheet({
             )}
 
             {/* 초점 범위 (Focus Range) — 건드리지 않음 */}
-            <div className="mb-2 sm:mb-4">
+            <div className="mb-1.5">
               <div className="flex items-center justify-between mb-1.5 sm:mb-2.5">
                 <span className="text-white text-sm font-medium">초점 범위</span>
                 <span className="text-zinc-500 text-xs">Focus Range</span>
@@ -369,8 +369,8 @@ export default function BottomSheet({
             </div>
 
             {/* 블러 강도 슬라이더 — 건드리지 않음 */}
-            <div className="mb-3 sm:mb-5">
-              <div className="mb-2 sm:mb-3">
+            <div className="mb-3">
+              <div className="mb-2">
                 <span className="text-white text-sm font-medium">배경 블러 강도</span>
               </div>
 
