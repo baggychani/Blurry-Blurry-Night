@@ -6,7 +6,7 @@ const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "Blurry Blurry Night",
-  description: "AI로 사진 배경을 블러 처리하는 무료 웹앱. 모든 연산은 브라우저에서.",
+  description: "AI로 사진의 배경을 쉽게 블러 처리하세요! 모든 연산은 브라우저에서.",
   // PWA 관련 메타
   applicationName: "Blurry Blurry Night",
   appleWebApp: {
@@ -21,7 +21,7 @@ export const metadata: Metadata = {
   openGraph: {
     type: "website",
     title: "Blurry Blurry Night",
-    description: "AI로 사진 배경을 블러 처리하는 무료 웹앱",
+    description: "AI로 사진의 배경을 쉽게 블러 처리하세요!",
   },
 };
 

@@ -5,6 +5,8 @@ import { useEffect, useRef } from "react";
 interface FocusRangeSliderProps {
   value: [number, number];
   onChange: (range: [number, number]) => void;
+  /** 포인터를 뗄 때(드래그 종료) 풀 품질 렌더 등에 사용 */
+  onCommit?: (range: [number, number]) => void;
   histogramData?: number[];
   disabled?: boolean;
 }
@@ -48,11 +50,13 @@ const INSET_RING = "inset 0 0 0 2px rgba(255,255,255,0.92)";
 export default function FocusRangeSlider({
   value,
   onChange,
+  onCommit,
   histogramData,
   disabled = false,
 }: FocusRangeSliderProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const pendingRef = useRef<[number, number]>(value);
   const dragRef = useRef<{
     mode: "left" | "right" | "body";
     startPct: number;
@@ -60,6 +64,10 @@ export default function FocusRangeSlider({
   } | null>(null);
 
   const halfHit = EDGE_HIT / 2;
+
+  useEffect(() => {
+    pendingRef.current = value;
+  }, [value]);
 
   /* ── Histogram 캔버스 그리기 ───────────────────────────────────────────── */
   useEffect(() => {
@@ -117,10 +125,14 @@ export default function FocusRangeSlider({
   };
 
   const endDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    const hadDrag = dragRef.current !== null;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) {
       e.currentTarget.releasePointerCapture(e.pointerId);
     }
     dragRef.current = null;
+    if (hadDrag && onCommit) {
+      onCommit(pendingRef.current);
+    }
   };
 
   const makeHandlers = (mode: "left" | "right" | "body") => ({
@@ -128,6 +140,7 @@ export default function FocusRangeSlider({
       if (disabled) return;
       e.preventDefault();
       e.stopPropagation();
+      pendingRef.current = [value[0], value[1]];
       dragRef.current = {
         mode,
         startPct: getPercent(e.clientX),
@@ -140,16 +153,19 @@ export default function FocusRangeSlider({
       if (!drag || !e.currentTarget.hasPointerCapture(e.pointerId) || disabled) return;
       const pct = getPercent(e.clientX);
       const { mode: m, startPct, startRange } = drag;
+      let next: [number, number];
       if (m === "left") {
-        onChange([Math.round(Math.min(pct, value[1] - 6)), value[1]]);
+        next = [Math.round(Math.min(pct, value[1] - 6)), value[1]];
       } else if (m === "right") {
-        onChange([value[0], Math.round(Math.max(pct, value[0] + 6))]);
+        next = [value[0], Math.round(Math.max(pct, value[0] + 6))];
       } else {
         const w = startRange[1] - startRange[0];
         const delta = pct - startPct;
         const newMin = Math.max(0, Math.min(100 - w, startRange[0] + delta));
-        onChange([Math.round(newMin), Math.round(newMin + w)]);
+        next = [Math.round(newMin), Math.round(newMin + w)];
       }
+      onChange(next);
+      pendingRef.current = next;
     },
     onPointerUp: endDrag,
     onPointerCancel: endDrag,
@@ -225,7 +241,7 @@ export default function FocusRangeSlider({
       <div className="flex justify-between mt-1.5">
         <span className="text-zinc-500 text-xs">← 가까이</span>
         <span className="text-zinc-400 text-xs font-mono tabular-nums">
-          {min}% ~ {max}%
+          {min}% - {max}%
         </span>
         <span className="text-zinc-500 text-xs">멀리 →</span>
       </div>

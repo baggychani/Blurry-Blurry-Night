@@ -8,7 +8,39 @@ import UploadZone from "@/components/UploadZone";
 import BottomSheet from "@/components/BottomSheet";
 import CompareSlider from "@/components/CompareSlider";
 import { useDepth } from "@/hooks/useDepth";
-import { compositeBlur, drawMaskOverlay, downloadCanvas } from "@/lib/webglComposite";
+import {
+  compositeBlur,
+  drawMaskOverlay,
+  downloadCanvas,
+  type SubjectMask,
+} from "@/lib/webglComposite";
+import { growRegionFromPoint } from "@/lib/regionGrow";
+
+/** 탭 투 포커스 시 초점 구간 너비 (UI percent 기준 ±) */
+const FOCUS_TAP_WINDOW = 20;
+
+function clampPercent(value: number): number {
+  return Math.max(0, Math.min(100, value));
+}
+
+function depthValueToFocusRange(depthValue: number): [number, number] {
+  // UI는 왼쪽=가까움(depth 1), 오른쪽=멀리(depth 0)이므로 depth를 UI percent로 뒤집는다.
+  const focusCenter = clampPercent(100 - (depthValue / 255) * 100);
+  return [
+    clampPercent(focusCenter - FOCUS_TAP_WINDOW),
+    clampPercent(focusCenter + FOCUS_TAP_WINDOW),
+  ];
+}
+
+function sampleDepthRangeAt(
+  depth: { data: Uint8Array; width: number; height: number },
+  xRatio: number,
+  yRatio: number
+): [number, number] {
+  const x = Math.max(0, Math.min(depth.width - 1, Math.round(xRatio * (depth.width - 1))));
+  const y = Math.max(0, Math.min(depth.height - 1, Math.round(yRatio * (depth.height - 1))));
+  return depthValueToFocusRange(depth.data[y * depth.width + x] ?? 0);
+}
 
 export default function Home() {
   const [uploadedImage, setUploadedImage] = useState<HTMLImageElement | null>(null);
@@ -19,6 +51,8 @@ export default function Home() {
   const [focusRange, setFocusRange] = useState<[number, number]>([0, 50]);
   const [histogramData, setHistogramData] = useState<number[]>([]);
   const [resultVersion, setResultVersion] = useState(0);
+  const [hasTappedFocus, setHasTappedFocus] = useState(false);
+  const [tapFocusMode, setTapFocusMode] = useState(false);
   const isProcessingRef = useRef(false);
   // ref로 최신 focusRange를 콜백에서 stale closure 없이 참조
   const focusRangeRef = useRef<[number, number]>([0, 50]);
@@ -34,6 +68,9 @@ export default function Home() {
 
   // 마스크 오버레이 전용 캔버스
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
+  const maskOverlayRafRef = useRef(0);
+  const resultInteractiveRafRef = useRef(0);
+  const subjectMaskRef = useRef<SubjectMask | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -41,7 +78,11 @@ export default function Home() {
 
   // ── 블러 결과를 resultCanvas에 그리기 ─────────────────────────────────────
   const renderResult = useCallback(
-    (img: HTMLImageElement, blur: number) => {
+    (
+      img: HTMLImageElement,
+      blur: number,
+      opts?: { blurInteractive?: boolean }
+    ) => {
       if (!resultCanvasRef.current) {
         resultCanvasRef.current = document.createElement("canvas");
       }
@@ -68,6 +109,8 @@ export default function Home() {
         blurRadius: blur,
         bokehShape,
         focusRange: focusRangeRef.current,
+        blurInteractive: opts?.blurInteractive ?? false,
+        subjectMask: subjectMaskRef.current,
       });
     },
     [bokehShape]
@@ -84,17 +127,60 @@ export default function Home() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // 항상 원본 먼저 그림
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0);
 
     if (!depth) {
-      // Depth가 없으면 원본만 표시하고, 안내 메시지는 UI 레이어에서
+      ctx.drawImage(img, 0, 0);
       return;
     }
 
-    // Depth 오버레이 추가 (focusRangeRef로 최신 초점 범위 전달)
-    drawMaskOverlay(canvas, img, depth.data, depth.width, depth.height, focusRangeRef.current);
+    drawMaskOverlay(
+      canvas,
+      img,
+      depth.data,
+      depth.width,
+      depth.height,
+      focusRangeRef.current
+    );
+  }, []);
+
+  /** 초점 슬라이더 드래그 중: 프레임당 1회 (WebGL 오버레이·저해상도 블러) */
+  const scheduleFocusLiveUpdate = useCallback(
+    (img: HTMLImageElement) => {
+      if (maskOverlayRafRef.current) {
+        cancelAnimationFrame(maskOverlayRafRef.current);
+      }
+      maskOverlayRafRef.current = requestAnimationFrame(() => {
+        maskOverlayRafRef.current = 0;
+        renderMaskOverlay(img);
+      });
+    },
+    [renderMaskOverlay]
+  );
+
+  const scheduleResultInteractive = useCallback(
+    (img: HTMLImageElement, blur: number) => {
+      if (resultInteractiveRafRef.current) {
+        cancelAnimationFrame(resultInteractiveRafRef.current);
+      }
+      resultInteractiveRafRef.current = requestAnimationFrame(() => {
+        resultInteractiveRafRef.current = 0;
+        renderResult(img, blur, { blurInteractive: true });
+        setResultVersion((v) => v + 1);
+      });
+    },
+    [renderResult]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (maskOverlayRafRef.current) {
+        cancelAnimationFrame(maskOverlayRafRef.current);
+      }
+      if (resultInteractiveRafRef.current) {
+        cancelAnimationFrame(resultInteractiveRafRef.current);
+      }
+    };
   }, []);
 
   // ── 이미지 처리 (Depth 추정) ─────────────────────────────────────────────
@@ -144,9 +230,15 @@ export default function Home() {
     async (img: HTMLImageElement, _file: File) => {
       depthDataRef.current = null;
       resultCanvasRef.current = null;
+      subjectMaskRef.current = null;
       setResultVersion(0);
       setMaskMode(false);
       setHistogramData([]);
+      setHasTappedFocus(false);
+      setTapFocusMode(false);
+      // 새 이미지 업로드 시 초점 범위를 기본값으로 초기화
+      focusRangeRef.current = [0, 50];
+      setFocusRange([0, 50]);
       setUploadedImage(img);
       await processImage(img);
     },
@@ -184,13 +276,97 @@ export default function Home() {
       setFocusRange(range);
       if (!uploadedImage || isProcessing) return;
       if (maskMode) {
+        scheduleFocusLiveUpdate(uploadedImage);
+      } else {
+        scheduleResultInteractive(uploadedImage, blurRadius);
+      }
+    },
+    [
+      uploadedImage,
+      isProcessing,
+      maskMode,
+      scheduleFocusLiveUpdate,
+      scheduleResultInteractive,
+      blurRadius,
+    ]
+  );
+
+  const handleFocusRangeCommit = useCallback(
+    (range: [number, number]) => {
+      focusRangeRef.current = range;
+      setFocusRange(range);
+      if (!uploadedImage || isProcessing) return;
+      if (maskOverlayRafRef.current) {
+        cancelAnimationFrame(maskOverlayRafRef.current);
+        maskOverlayRafRef.current = 0;
+      }
+      if (resultInteractiveRafRef.current) {
+        cancelAnimationFrame(resultInteractiveRafRef.current);
+        resultInteractiveRafRef.current = 0;
+      }
+      if (maskMode) {
         renderMaskOverlay(uploadedImage);
       } else {
-        renderResult(uploadedImage, blurRadius);
+        renderResult(uploadedImage, blurRadius, { blurInteractive: false });
+      }
+      setResultVersion((v) => v + 1);
+    },
+    [
+      uploadedImage,
+      isProcessing,
+      maskMode,
+      blurRadius,
+      renderMaskOverlay,
+      renderResult,
+    ]
+  );
+
+  const handleTapFocus = useCallback(
+    (point: { xRatio: number; yRatio: number }) => {
+      const depth = depthDataRef.current;
+      if (!uploadedImage || !depth || isProcessing) return;
+
+      // 초점 범위: 탭한 지점의 깊이값 기반
+      const nextRange = sampleDepthRangeAt(depth, point.xRatio, point.yRatio);
+      focusRangeRef.current = nextRange;
+      setFocusRange(nextRange);
+
+      setHasTappedFocus(true);
+
+      // Subject Lock: 탭한 물체를 색상 기반 region grow로 추출
+      try {
+        const mask = growRegionFromPoint(uploadedImage, point.xRatio, point.yRatio);
+        subjectMaskRef.current = mask;
+      } catch (e) {
+        console.warn("[TapFocus] regionGrow 실패, subject mask 없이 진행:", e);
+        subjectMaskRef.current = null;
+      }
+
+      // 탭은 드래그가 아니라 단발성 이벤트이므로 풀 품질 렌더
+      if (maskOverlayRafRef.current) {
+        cancelAnimationFrame(maskOverlayRafRef.current);
+        maskOverlayRafRef.current = 0;
+      }
+      if (resultInteractiveRafRef.current) {
+        cancelAnimationFrame(resultInteractiveRafRef.current);
+        resultInteractiveRafRef.current = 0;
+      }
+
+      if (maskMode) {
+        renderMaskOverlay(uploadedImage);
+      } else {
+        renderResult(uploadedImage, blurRadius, { blurInteractive: false });
         setResultVersion((v) => v + 1);
       }
     },
-    [uploadedImage, isProcessing, maskMode, renderMaskOverlay, renderResult, blurRadius]
+    [
+      uploadedImage,
+      isProcessing,
+      maskMode,
+      blurRadius,
+      renderMaskOverlay,
+      renderResult,
+    ]
   );
 
   // ── 블러 슬라이더 ─────────────────────────────────────────────────────────
@@ -215,18 +391,27 @@ export default function Home() {
   // ── 마스크 모드 토글 ─────────────────────────────────────────────────────
   const handleMaskModeToggle = useCallback(() => {
     const next = !maskMode;
+    if (!next) {
+      if (maskOverlayRafRef.current) {
+        cancelAnimationFrame(maskOverlayRafRef.current);
+        maskOverlayRafRef.current = 0;
+      }
+    }
     setMaskMode(next);
     if (next && uploadedImage && !isProcessing) {
-      // 마스크 캔버스를 다음 렌더 사이클에서 그리도록 requestAnimationFrame 사용
       requestAnimationFrame(() => renderMaskOverlay(uploadedImage));
     }
   }, [maskMode, uploadedImage, isProcessing, renderMaskOverlay]);
 
   // ── 다운로드 ─────────────────────────────────────────────────────────────
   const handleDownload = useCallback(() => {
-    if (!resultCanvasRef.current) return;
-    downloadCanvas(resultCanvasRef.current, `bbn-${Date.now()}`, "jpeg", 0.95);
-  }, []);
+    if (!resultCanvasRef.current || !uploadedImage) return;
+    // 저장 직전 풀 해상도·풀 품질 블러로 동기화 (프리뷰 1024 경로와 무관하게 원본 크기 보장)
+    if (depthDataRef.current) {
+      renderResult(uploadedImage, blurRadius, { blurInteractive: false });
+    }
+    downloadCanvas(resultCanvasRef.current, `bbn-${Date.now()}`, "jpeg", 0.98);
+  }, [uploadedImage, blurRadius, renderResult]);
 
   return (
     <main
@@ -244,7 +429,7 @@ export default function Home() {
       <Header status={depthStatus} progress={depthProgress} />
 
       {/* 프리뷰 영역 */}
-      <div className="flex-1 relative mx-2 sm:mx-4 my-2 overflow-hidden rounded-2xl bg-zinc-950 min-h-0">
+      <div className="flex-1 relative mx-1 sm:mx-2 mt-1 mb-0 overflow-hidden rounded-t-xl bg-zinc-950 min-h-0">
         {uploadedImage ? (
           <>
             {/* AI 처리 중 오버레이 */}
@@ -259,11 +444,13 @@ export default function Home() {
             {/* 마스크 모드 */}
             {maskMode ? (
               <>
-                <canvas
-                  ref={maskCanvasRef}
-                  className="absolute inset-0 m-auto max-w-full max-h-full"
-                  style={{ display: "block", top: 0, bottom: 0, left: 0, right: 0 }}
-                />
+                {/* CompareSlider와 동일: 부모를 꽉 채운 뒤 캔버스만 비율 유지 축소 */}
+                <div className="absolute inset-0 overflow-hidden rounded-2xl">
+                  <canvas
+                    ref={maskCanvasRef}
+                    className="absolute inset-0 m-auto max-w-full max-h-full block"
+                  />
+                </div>
                 {!isProcessing && !depthDataRef.current && (
                   <div className="absolute top-3 inset-x-0 flex justify-center z-10 pointer-events-none">
                     <div className="bg-black/60 backdrop-blur-sm border border-red-500/40 text-red-300 text-xs font-medium px-3 py-1.5 rounded-lg">
@@ -279,9 +466,19 @@ export default function Home() {
                   <CompareSlider
                     originalImage={uploadedImage}
                     resultCanvas={resultCanvasRef.current}
-                    // 처리 완료 시마다 슬라이더 내부를 갱신하기 위한 키
+                    tapFocusMode={tapFocusMode}
+                    onTapFocus={handleTapFocus}
                     renderKey={`${blurRadius}-${bokehShape}-${focusRange[0]}-${focusRange[1]}-${resultVersion}`}
                   />
+                  {!tapFocusMode && !hasTappedFocus && !isProcessing && (
+                    <div className="absolute bottom-4 inset-x-0 flex justify-center pointer-events-none z-10">
+                      <div className="flex items-center gap-2 bg-black/70 backdrop-blur-sm border border-white/15 text-white text-xs font-medium px-3.5 py-2 rounded-full shadow-lg">
+                        <span className="text-center px-1">
+                          아래 「탭으로 초점 맞추기」를 켠 뒤 사진을 탭하세요
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )
             )}
@@ -307,7 +504,10 @@ export default function Home() {
             onBokehShapeChange={setBokehShape}
             focusRange={focusRange}
             onFocusRangeChange={handleFocusRangeChange}
+            onFocusRangeCommit={handleFocusRangeCommit}
             histogramData={histogramData}
+            tapFocusMode={tapFocusMode}
+            onTapFocusModeToggle={() => setTapFocusMode((v) => !v)}
           />
         )}
       </AnimatePresence>

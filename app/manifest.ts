@@ -9,7 +9,7 @@ export default function manifest(): MetadataRoute.Manifest {
   return {
     name: "Blurry Blurry Night",
     short_name: "BBN",
-    description: "AI로 사진 배경을 블러 처리하는 무료 웹앱. 모든 연산은 브라우저에서.",
+    description: "AI로 사진의 배경을 쉽게 블러 처리하세요! 모든 연산은 브라우저에서.",
     start_url: `${base}/` || "/",
     display: "standalone",
     background_color: "#0a0a0a",
