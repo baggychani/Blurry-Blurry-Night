@@ -1,0 +1,54 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+
+# production
+build/
+dist/
+
+# debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# local env files
+.env
+.env*.local
+
+# vercel
+.vercel/
+
+# typescript
+*.tsbuildinfo
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# local-only launch helpers
+*.lnk
+
+# next-pwa / Workbox (production build 시 public에 생성될 수 있음)
+public/sw.js
+public/sw.js.map
+public/workbox-*.js
+public/workbox-*.js.map
+public/swe-worker-*.js
+public/fallback-*.js
+
+# 테스트·커버리지
+coverage/
+.nyc_output/
+
+# 임시
+*.tmp
+*.temp
+.cache/
