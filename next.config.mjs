@@ -4,13 +4,16 @@ import withPWAInit from "@ducanh2912/next-pwa";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/** GitHub Pages 프로젝트 사이트(user.github.io/레포이름)일 때 CI에서만 설정 */
+const basePath = process.env.NEXT_BASE_PATH?.trim() || "";
+
 const withPWA = withPWAInit({
   dest: "public",
   // 개발 환경에서는 서비스 워커 비활성화 (핫 리로드 간섭 방지)
   disable: process.env.NODE_ENV === "development",
-  // 오프라인 폴백 페이지
+  // 오프라인 폴백 (GitHub Pages basePath 배포 시 경로 맞춤)
   fallbacks: {
-    document: "/offline",
+    document: `${basePath}/offline`,
   },
   // 캐시 전략 설정
   cacheOnFrontEndNav: true,
@@ -23,6 +26,13 @@ const withPWA = withPWAInit({
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // GitHub Pages 등 정적 호스팅용 (서버 없이 out/ 배포)
+  output: "export",
+  images: {
+    unoptimized: true,
+  },
+  ...(basePath ? { basePath } : {}),
+
   // Turbopack(기본): 브라우저/워커 번들에서 Node 코어 모듈 → 스텁
   turbopack: {
     resolveAlias: {

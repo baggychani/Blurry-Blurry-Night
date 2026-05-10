@@ -37,11 +37,33 @@ npm run dev
 
 저장소 루트의 `Blurry Blurry Night 실행.bat`을 더블클릭하면 개발 서버 기동 후 브라우저를 열 수 있습니다.
 
-### 프로덕션 빌드
+### 정적 빌드 (산출물 `out/`)
+
+Next.js를 **`output: 'export'`** 로 두어 HTML/CSS/JS만 생성합니다. `npm run start`(Node 서버)는 사용하지 않습니다.
 
 ```bash
 npm run build
-npm start
+# 미리보기(선택): npx serve@14 out
+```
+
+---
+
+## GitHub Pages 배포
+
+1. 저장소 **Settings → Pages → Build and deployment**
+2. **Source**를 **GitHub Actions**로 변경
+3. `main` 또는 `master`에 푸시하면 `.github/workflows/deploy-github-pages.yml`이 빌드 후 `out/`을 배포합니다.
+
+**주소가 `https://<사용자>.github.io/<저장소이름>/` 인 경우**  
+워크플로의 `NEXT_BASE_PATH: /Blurry-Blurry-Night`를 **실제 저장소 이름과 동일**하게 두세요.  
+`https://<사용자>.github.io/` **루트만** 쓰는 저장소(`username.github.io` 레포)라면 해당 env 줄을 **삭제**하고, 로컬 `next.config.mjs`의 `basePath`도 비우고 빌드하도록 워크플로를 맞추면 됩니다.
+
+로컬에서 Pages와 동일하게 보려면:
+
+```bash
+# PowerShell 예시
+$env:NEXT_BASE_PATH="/Blurry-Blurry-Night"; npm run build
+npx serve@14 out
 ```
 
 ---
@@ -51,8 +73,8 @@ npm start
 | 명령 | 설명 |
 |------|------|
 | `npm run dev` | 개발 서버 |
-| `npm run build` | 프로덕션 빌드 |
-| `npm run start` | 프로덕션 서버 |
+| `npm run build` | 정적 내보내기 → `out/` |
+| `npm run start` | (정적 배포에서는 미사용) |
 | `npm run lint` | ESLint |
 | `npm run type-check` | TypeScript 검사 |
 
