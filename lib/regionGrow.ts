@@ -6,7 +6,8 @@
  */
 
 export interface RegionMask {
-  data: Uint8Array; // 1 = 선택 영역, 0 = 배경
+  data: Uint8Array;     // 1 = 선택 영역, 0 = 배경 (binary)
+  softData: Uint8Array; // 0–255 soft edge (BFS 후 2-pass box blur)
   width: number;
   height: number;
 }
@@ -93,5 +94,42 @@ export function growRegionFromPoint(
     if (y < ph - 1) enqueue(idx + pw);
   }
 
-  return { data: mask, width: pw, height: ph };
+  return { data: mask, softData: softBlurMask(mask, pw, ph, 3), width: pw, height: ph };
+}
+
+/**
+ * 2-pass separable box blur (horizontal → vertical).
+ * Uint8Array binary mask(0/1)를 받아 0–255 soft mask로 반환한다.
+ * radius=3: 7-tap, 512×512에서 약 3.7M ops (≈20ms 이내)
+ */
+function softBlurMask(mask: Uint8Array, w: number, h: number, radius: number): Uint8Array {
+  const size = w * h;
+  const tmp = new Float32Array(size);
+  const tap = radius * 2 + 1;
+
+  // Horizontal pass
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      for (let dx = -radius; dx <= radius; dx++) {
+        const nx = Math.max(0, Math.min(w - 1, x + dx));
+        sum += mask[y * w + nx];
+      }
+      tmp[y * w + x] = sum / tap;
+    }
+  }
+
+  // Vertical pass → Uint8Array (0–255)
+  const out = new Uint8Array(size);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      for (let dy = -radius; dy <= radius; dy++) {
+        const ny = Math.max(0, Math.min(h - 1, y + dy));
+        sum += tmp[ny * w + x];
+      }
+      out[y * w + x] = Math.round((sum / tap) * 255);
+    }
+  }
+  return out;
 }

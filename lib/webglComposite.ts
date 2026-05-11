@@ -3,7 +3,8 @@ import { downloadCanvas } from "./canvasComposite";
 export { downloadCanvas };
 
 export interface SubjectMask {
-  data: Uint8Array; // 1 = 피사체(블러 차단), 0 = 배경
+  data: Uint8Array;     // 1 = 피사체(블러 차단), 0 = 배경 (binary)
+  softData: Uint8Array; // 0–255 soft edge (JBU 마스크 가이드용)
   width: number;
   height: number;
 }
@@ -28,6 +29,58 @@ const MAX_WEBGL_INPUT_EDGE = 1024;
 const INTERACTIVE_BLUR_MAX_EDGE = 1024;
 const BLUR_SLIDER_MAX = 30;
 
+/**
+ * JBU 캐시: depthData 레퍼런스 + maskRef가 둘 다 일치할 때만 재사용.
+ * maskRef가 바뀌면(새 탭) 재계산하여 Mask-Guided JBU 결과를 갱신한다.
+ */
+const jbuCache = new WeakMap<
+  Uint8Array,
+  { w: number; h: number; canvas: HTMLCanvasElement; maskRef: HTMLCanvasElement | null }
+>();
+
+/** 타일링 필름 그레인 (블러 레이어만, 풀 해상도 getImageData 없음) */
+let grainTileCanvas: HTMLCanvasElement | null = null;
+
+function getGrainTileCanvas(): HTMLCanvasElement {
+  if (grainTileCanvas) return grainTileCanvas;
+  const sz = 256;
+  const c = makeCanvas(sz, sz);
+  const g = c.getContext("2d")!;
+  const img = g.createImageData(sz, sz);
+  const d = img.data;
+  for (let i = 0; i < sz * sz; i++) {
+    const v = 85 + Math.floor(Math.random() * 171);
+    const b = i * 4;
+    d[b] = d[b + 1] = d[b + 2] = v;
+    d[b + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  grainTileCanvas = c;
+  return c;
+}
+
+/** 블러 레이어에만 미세 그레인 (인터랙티브 모드에서는 생략) */
+function applyFilmGrainToBlurLayer(
+  blurCtx: CanvasRenderingContext2D,
+  w: number,
+  h: number,
+  blurInteractive: boolean
+): void {
+  if (blurInteractive) return;
+  const tile = getGrainTileCanvas();
+  blurCtx.save();
+  blurCtx.globalAlpha = 0.028;
+  blurCtx.globalCompositeOperation = "overlay";
+  const tw = tile.width;
+  const th = tile.height;
+  for (let y = 0; y < h; y += th) {
+    for (let x = 0; x < w; x += tw) {
+      blurCtx.drawImage(tile, x, y);
+    }
+  }
+  blurCtx.restore();
+}
+
 /** UI: 왼쪽=가까움(깊이 큼), 오른쪽=멀(깊이 작음) → 셰이더용 [u.x=먼쪽, u.y=가까운쪽] */
 function focusRangeUiToDepthBounds(ui: [number, number]): [number, number] {
   const [leftPct, rightPct] = ui;
@@ -39,6 +92,17 @@ function makeCanvas(w: number, h: number): HTMLCanvasElement {
   c.width = w;
   c.height = h;
   return c;
+}
+
+/**
+ * WebGL 캔버스 내용을 2D 캔버스로 복사한다.
+ * `loseContext()` 호출 후에는 WebGL 프레임버퍼가 무효화되므로, 반드시 그 전에 호출해야 한다.
+ */
+function snapshotWebGLCanvasTo2D(glCanvas: HTMLCanvasElement): HTMLCanvasElement {
+  const snap = makeCanvas(glCanvas.width, glCanvas.height);
+  const c = snap.getContext("2d")!;
+  c.drawImage(glCanvas, 0, 0);
+  return snap;
 }
 
 function turboLikeColor(t: number): [number, number, number] {
@@ -329,15 +393,17 @@ function renderDepthMapOverlayWebGL(
 
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 
+  outCanvas.width = W;
+  outCanvas.height = H;
+  const outCtx = outCanvas.getContext("2d")!;
+  // loseContext 전에 픽셀을 복사해야 함 (그렇지 않으면 버퍼가 비어 보임)
+  outCtx.drawImage(glCanvas, 0, 0);
+
   if (imageTex) gl.deleteTexture(imageTex);
   if (depthTex) gl.deleteTexture(depthTex);
   if (buffer) gl.deleteBuffer(buffer);
   gl.deleteProgram(program);
-
-  outCanvas.width = W;
-  outCanvas.height = H;
-  const outCtx = outCanvas.getContext("2d")!;
-  outCtx.drawImage(glCanvas, 0, 0);
+  gl.getExtension("WEBGL_lose_context")?.loseContext();
 }
 
 function drawMaskOverlayCpu(
@@ -395,19 +461,22 @@ function drawMaskOverlayCpu(
 }
 
 /**
- * Joint Bilateral Upsampling (JBU) — 1-pass WebGL
+ * Mask-Guided Joint Bilateral Upsampling (JBU) — 1-pass WebGL
  *
  * 저해상도 깊이 맵을 고해상도 컬러 이미지(guide)의 엣지에 맞춰 업샘플.
- * 5×5 커널: 공간 가우시안 × 컬러 유사도 가우시안 → 피사체 경계에서 깊이가
- * 원본 이미지 윤곽선을 따라 칼같이 분리됨.
+ * 5×5 커널: 공간 가우시안 × 컬러 유사도 가우시안 × 마스크 경계 가중치.
+ * maskCanvas가 제공되면 전경/배경 depth 값이 경계를 넘어 누출되는 현상을 방지한다.
+ * (논문 Fig. 2(e) layered compositing을 WebGL 단패스로 근사)
  *
  * @param rawDepthCanvas  AI 모델 원본 저해상도 깊이 캔버스
  * @param guideCanvas     업샘플 목표 해상도의 컬러 이미지 캔버스
+ * @param maskCanvas      SubjectMask softData 기반 그레이스케일 캔버스 (없으면 마스크 가중치 = 1)
  * @returns               guideCanvas 해상도와 동일한 엣지 보존 깊이 캔버스
  */
 function upsampleDepthJBU(
   rawDepthCanvas: HTMLCanvasElement,
-  guideCanvas: HTMLCanvasElement
+  guideCanvas: HTMLCanvasElement,
+  maskCanvas: HTMLCanvasElement | null
 ): HTMLCanvasElement {
   const W = guideCanvas.width;
   const H = guideCanvas.height;
@@ -441,30 +510,35 @@ function upsampleDepthJBU(
     }
   `;
 
-  // 5×5 Joint Bilateral: 공간 가우시안(σ=1.6) × 컬러 가우시안(σ²≈0.04)
+  // 5×5 Mask-Guided Joint Bilateral:
+  //   공간 가우시안(σ=1.6) × 컬러 가우시안(σ²≈0.04) × 마스크 경계 가우시안(σ²≈0.005)
+  // maskW: 마스크 값 차이가 0.07(≈18/255) 이상이면 가중치가 급격히 감소 →
+  //   전경 픽셀이 배경 depth 값을 흡수하지 못함 = 경계 누출(halo) 방지
   const fragSrc = `
     precision highp float;
 
     uniform sampler2D u_depth;
     uniform sampler2D u_guide;
+    uniform sampler2D u_mask;
     uniform vec2 u_depthSize;
 
     varying vec2 v_texCoord;
 
     void main() {
-      vec3 guideCenter = texture2D(u_guide, v_texCoord).rgb;
+      vec3  guideCenter = texture2D(u_guide, v_texCoord).rgb;
+      float maskCenter  = texture2D(u_mask,  v_texCoord).r;
 
       float sumDepth  = 0.0;
       float sumWeight = 0.0;
 
       for (int dy = -2; dy <= 2; dy++) {
         for (int dx = -2; dx <= 2; dx++) {
-          vec2 offset    = vec2(float(dx), float(dy)) / u_depthSize;
-          vec2 depthUV   = clamp(v_texCoord + offset, vec2(0.0), vec2(1.0));
-          vec2 guideUV   = clamp(v_texCoord + offset, vec2(0.0), vec2(1.0));
+          vec2 offset  = vec2(float(dx), float(dy)) / u_depthSize;
+          vec2 sampleUV = clamp(v_texCoord + offset, vec2(0.0), vec2(1.0));
 
-          float d = texture2D(u_depth, depthUV).r;
-          vec3  g = texture2D(u_guide, guideUV).rgb;
+          float d = texture2D(u_depth, sampleUV).r;
+          vec3  g = texture2D(u_guide, sampleUV).rgb;
+          float m = texture2D(u_mask,  sampleUV).r;
 
           // 공간 가우시안 (σ=1.6 → 2σ²≈5.12)
           float spatialW = exp(-float(dx*dx + dy*dy) / 5.12);
@@ -473,7 +547,12 @@ function upsampleDepthJBU(
           vec3  cd = guideCenter - g;
           float colorW = exp(-dot(cd, cd) / 0.04);
 
-          float w = spatialW * colorW;
+          // 마스크 경계 가우시안 (σ²≈0.005)
+          // 마스크 값 차이가 클수록 cross-boundary 샘플 가중치 급감 → layered 분리 효과
+          float maskDiff = abs(maskCenter - m);
+          float maskW = exp(-maskDiff * maskDiff / 0.005);
+
+          float w = spatialW * colorW * maskW;
           sumDepth  += d * w;
           sumWeight += w;
         }
@@ -525,8 +604,26 @@ function upsampleDepthJBU(
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, guideCanvas);
 
+  // TEXTURE2: 마스크 텍스처. 없으면 전체 흰색 1×1 텍스처(maskW = 1.0 → 기존 동작 유지)
+  const maskTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE2);
+  gl.bindTexture(gl.TEXTURE_2D, maskTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  if (maskCanvas) {
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskCanvas);
+  } else {
+    // 단색 흰색 1×1: maskCenter=1, maskSample=1 → maskDiff=0 → maskW=1.0
+    const white = new Uint8Array([255, 255, 255, 255]);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, white);
+  }
+
   gl.uniform1i(gl.getUniformLocation(program, "u_depth"), 0);
   gl.uniform1i(gl.getUniformLocation(program, "u_guide"), 1);
+  gl.uniform1i(gl.getUniformLocation(program, "u_mask"),  2);
   gl.uniform2f(
     gl.getUniformLocation(program, "u_depthSize"),
     rawDepthCanvas.width,
@@ -535,12 +632,52 @@ function upsampleDepthJBU(
 
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 
-  if (depthTex) gl.deleteTexture(depthTex);
-  if (guideTex) gl.deleteTexture(guideTex);
+  const snapshot = snapshotWebGLCanvasTo2D(glCanvas);
+
+  if (depthTex)  gl.deleteTexture(depthTex);
+  if (guideTex)  gl.deleteTexture(guideTex);
+  if (maskTex)   gl.deleteTexture(maskTex);
   if (buf) gl.deleteBuffer(buf);
   gl.deleteProgram(program);
+  gl.getExtension("WEBGL_lose_context")?.loseContext();
 
-  return glCanvas;
+  return snapshot;
+}
+
+function getOrComputeJBU(
+  depthData: Uint8Array,
+  depthWidth: number,
+  depthHeight: number,
+  targetW: number,
+  targetH: number,
+  maskCanvas: HTMLCanvasElement | null
+): HTMLCanvasElement {
+  const cached = jbuCache.get(depthData);
+  if (
+    cached &&
+    cached.w === targetW &&
+    cached.h === targetH &&
+    cached.maskRef === maskCanvas
+  ) {
+    return cached.canvas;
+  }
+
+  const rawDepthCanvas = createDepthTextureCanvas(depthData, depthWidth, depthHeight);
+  const targetCanvas = makeCanvas(targetW, targetH);
+  let highRes: HTMLCanvasElement;
+  try {
+    highRes = upsampleDepthJBU(rawDepthCanvas, targetCanvas, maskCanvas);
+  } catch (e) {
+    console.warn("[JBU] failed, bilinear fallback", e);
+    highRes = makeCanvas(targetW, targetH);
+    const fc = highRes.getContext("2d")!;
+    fc.imageSmoothingEnabled = true;
+    fc.imageSmoothingQuality = "high";
+    fc.drawImage(rawDepthCanvas, 0, 0, targetW, targetH);
+  }
+
+  jbuCache.set(depthData, { w: targetW, h: targetH, canvas: highRes, maskRef: maskCanvas });
+  return highRes;
 }
 
 function renderBlurAlphaMaskWebGL(
@@ -565,18 +702,27 @@ function renderBlurAlphaMaskWebGL(
     const depthPixels = depthCtx.getImageData(0, 0, W, H);
     const mask = fallbackCtx.createImageData(W, H);
     const [dFar, dNear] = focusRangeUiToDepthBounds(focusRange);
+    const edgeZone = 0.04;
 
     for (let i = 0; i < W * H; i++) {
       const depth = depthPixels.data[i * 4] / 255;
-      const inFocus = depth >= dFar && depth <= dNear;
       const base = i * 4;
+      // 초점 경계에서 부드럽게 전이 (hard step → soft ramp)
+      const distToFocus = Math.max(dFar - depth, depth - dNear, 0);
+      const alpha = Math.min(1, distToFocus / edgeZone);
       mask.data[base] = 255;
       mask.data[base + 1] = 255;
       mask.data[base + 2] = 255;
-      mask.data[base + 3] = inFocus ? 0 : 255;
+      mask.data[base + 3] = Math.round(alpha * 255);
     }
 
-    fallbackCtx.putImageData(mask, 0, 0);
+    // 마스크 윤곽선을 살짝 뭉개서 합성 경계를 부드럽게
+    const tempCanvas = makeCanvas(W, H);
+    const tempCtx = tempCanvas.getContext("2d")!;
+    tempCtx.putImageData(mask, 0, 0);
+    fallbackCtx.filter = "blur(3px)";
+    fallbackCtx.drawImage(tempCanvas, 0, 0);
+    fallbackCtx.filter = "none";
     return fallback;
   }
 
@@ -596,25 +742,20 @@ function renderBlurAlphaMaskWebGL(
 
     uniform sampler2D u_depthMap;
     uniform vec2 u_focusRange;
-    uniform vec2 u_resolution;
 
     varying vec2 v_texCoord;
 
-    bool inFocusDepth(float depth) {
-      return depth >= u_focusRange.x && depth <= u_focusRange.y;
-    }
-
     void main() {
       float depth = texture2D(u_depthMap, v_texCoord).r;
-      bool inFocus = inFocusDepth(depth);
-      vec2 texel = 1.0 / u_resolution;
-      bool neighborInFocus =
-        inFocusDepth(texture2D(u_depthMap, clamp(v_texCoord + vec2(texel.x, 0.0), vec2(0.0), vec2(1.0))).r) ||
-        inFocusDepth(texture2D(u_depthMap, clamp(v_texCoord - vec2(texel.x, 0.0), vec2(0.0), vec2(1.0))).r) ||
-        inFocusDepth(texture2D(u_depthMap, clamp(v_texCoord + vec2(0.0, texel.y), vec2(0.0), vec2(1.0))).r) ||
-        inFocusDepth(texture2D(u_depthMap, clamp(v_texCoord - vec2(0.0, texel.y), vec2(0.0), vec2(1.0))).r);
 
-      float alpha = inFocus ? 0.0 : (neighborInFocus ? 0.5 : 1.0);
+      // 초점 경계까지의 거리 계산 → 경계 전이 구간(edgeZone)에서 smoothstep으로 부드럽게 전이
+      float edgeZone = 0.04;
+      float distToFocus = max(u_focusRange.x - depth, depth - u_focusRange.y);
+      distToFocus = max(distToFocus, 0.0);
+
+      // smoothstep: 0=완전 초점 → 1=완전 블러, 경계에서 S커브 전이
+      float alpha = smoothstep(0.0, edgeZone, distToFocus);
+
       gl_FragColor = vec4(1.0, 1.0, 1.0, alpha);
     }
   `;
@@ -662,20 +803,21 @@ function renderBlurAlphaMaskWebGL(
 
   const depthLocation = gl.getUniformLocation(program, "u_depthMap");
   const focusRangeLocation = gl.getUniformLocation(program, "u_focusRange");
-  const resolutionLocation = gl.getUniformLocation(program, "u_resolution");
   const [dFar, dNear] = focusRangeUiToDepthBounds(focusRange);
 
   gl.uniform1i(depthLocation, 0);
   gl.uniform2f(focusRangeLocation, dFar, dNear);
-  gl.uniform2f(resolutionLocation, W, H);
 
   gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+  const snapshot = snapshotWebGLCanvasTo2D(glCanvas);
 
   if (depthTexture) gl.deleteTexture(depthTexture);
   if (buffer) gl.deleteBuffer(buffer);
   gl.deleteProgram(program);
+  gl.getExtension("WEBGL_lose_context")?.loseContext();
 
-  return glCanvas;
+  return snapshot;
 }
 
 function renderLensBlurWebGL(
@@ -685,7 +827,8 @@ function renderLensBlurWebGL(
   depthWidth: number,
   depthHeight: number,
   bokehShape: number,
-  focusRange: [number, number]
+  focusRange: [number, number],
+  maskCanvas: HTMLCanvasElement | null
 ): HTMLCanvasElement {
   const glCanvas = makeCanvas(sourceCanvas.width, sourceCanvas.height);
   const gl = glCanvas.getContext("webgl", {
@@ -717,6 +860,13 @@ function renderLensBlurWebGL(
     const int SAMPLES = 64;
     const float GOLDEN_ANGLE = 2.39996323;
     const float PI = 3.14159265359;
+    const float GAMMA = 2.2;
+    // MDE 0–1 정규 깊이: 물리 미터 복원 전 단계. invZ만 쓰면 규약 변경이 한곳에 모임.
+    const float DEPTH_EPS = 0.001;
+    const float COC_SCALE = 0.18;
+    const float GATHER_SOFT_PX = 3.0;
+    // On-focal occlusion (Dr. Bokeh 근사): 초점 밖 픽셀은 카메라 쪽(깊이 큼) 샘플이 가리면 수집 거절
+    const float ONFOCAL_OCCLUDE_EPS = 0.03;
 
     uniform sampler2D u_image;
     uniform sampler2D u_depthMap;
@@ -727,6 +877,10 @@ function renderLensBlurWebGL(
     uniform int u_shape;
 
     varying vec2 v_texCoord;
+
+    float invZ(float d) {
+      return 1.0 / (d + DEPTH_EPS);
+    }
 
     float sdHexagon(vec2 p) {
       p = abs(p);
@@ -761,26 +915,28 @@ function renderLensBlurWebGL(
       return depth >= u_focusRange.x && depth <= u_focusRange.y;
     }
 
+    vec3 toLinear(vec3 srgb) {
+      return pow(max(srgb, vec3(1e-6)), vec3(GAMMA));
+    }
+
+    vec3 toSrgb(vec3 lin) {
+      return pow(max(lin, vec3(1e-6)), vec3(1.0 / GAMMA));
+    }
+
     void main() {
-      const float BOKEH_INTENSITY = 12.0;
+      // 하이라이트는 가중치만 키움(색상 곱 부스트 없음 → 에너지 보존에 유리)
+      const float BOKEH_INTENSITY = 8.0;
 
       float centerDepth = texture2D(u_depthMap, v_texCoord).r;
-      vec3  centerColor = texture2D(u_image,    v_texCoord).rgb;
+      vec3  centerSrgb  = texture2D(u_image,    v_texCoord).rgb;
+      vec3  centerColor = toLinear(centerSrgb);
       float centerLuma  = dot(centerColor, vec3(0.299, 0.587, 0.114));
 
-      // ── CoC: Z-공간 역수 기반 물리 모델 ──────────────────────────────────
-      float zCenter = 1.0 / (centerDepth      + 0.001);
-      float zFar    = 1.0 / (u_focusRange.x   + 0.001);
-      float zNear   = 1.0 / (u_focusRange.y   + 0.001);
+      // 초점 대역 끝의 역깊이 중점 = 초점 평면(옵션 A, 셰이더만)
+      float invFocal = 0.5 * (invZ(u_focusRange.x) + invZ(u_focusRange.y));
+      float centerCoC = abs(invZ(centerDepth) - invFocal);
+      float depthWeight = clamp(centerCoC * COC_SCALE, 0.0, 1.0);
 
-      float coc = 0.0;
-      if (zCenter > zNear) {
-        coc = (zCenter - zNear) / zCenter;
-      } else if (zCenter < zFar) {
-        coc = (zFar - zCenter) / zFar;
-      }
-
-      float depthWeight  = clamp(coc * 8.0, 0.0, 1.0);
       bool centerInFocus = inFocusDepth(centerDepth);
       if (!centerInFocus) {
         vec2 texel = 1.0 / u_resolution;
@@ -795,60 +951,94 @@ function renderLensBlurWebGL(
       }
       float effectiveBlur = u_blurRadius * depthWeight;
 
-      // ── Bokeh 루프 ────────────────────────────────────────────────────────
+      // Cat's eye: 종횡비 보정 NDC, 코너까지 정규화해 squash 계수가 음수로 가지 않게 clamp
+      float asp = u_resolution.x / max(u_resolution.y, 1.0);
+      vec2  ndc = vec2((v_texCoord.x - 0.5) * asp, v_texCoord.y - 0.5);
+      float distFromCenter = length(ndc);
+      float rmax = 0.5 * sqrt(asp * asp + 1.0);
+      float distNorm = clamp(distFromCenter / max(rmax, 1e-4), 0.0, 1.0);
+      vec2  dirToCenter = distFromCenter > 0.001 ? ndc / distFromCenter : vec2(1.0, 0.0);
+
       vec3  color       = vec3(0.0);
       float totalWeight = 0.0;
-
-      // caOffset: 블러가 강할수록 색수차 반경 증가 (미세 디테일만)
       float caOffset = effectiveBlur * 0.0008;
+      float threshLin = pow(max(u_threshold, 1e-4), GAMMA);
 
       for (int i = 0; i < SAMPLES; i++) {
         float r     = sqrt(float(i) + 0.5) / sqrt(float(SAMPLES));
         float theta = float(i) * GOLDEN_ANGLE;
         vec2  shapePoint = vec2(cos(theta), sin(theta)) * r;
 
+        float squash = mix(1.0, 0.55, distNorm * 0.95);
+        float proj = dot(shapePoint, dirToCenter);
+        vec2  perp = shapePoint - dirToCenter * proj;
+        shapePoint = dirToCenter * proj + perp * squash;
+
         if (!insideBokehShape(shapePoint, u_shape)) { continue; }
 
-        vec2 offset     = shapePoint * (effectiveBlur / u_resolution);
+        vec2 offset = shapePoint * (effectiveBlur / u_resolution);
         vec2 sampleCoord = clamp(v_texCoord + offset, vec2(0.0), vec2(1.0));
+        vec2 offsetPx = offset * u_resolution;
+        float distPx = length(offsetPx);
 
-        // 색수차: R 바깥쪽 / B 안쪽으로 샘플 좌표 분리
         vec2 caDir = normalize(offset + vec2(1e-6)) * caOffset;
-        vec4 sampleColor;
-        sampleColor.r = texture2D(u_image, clamp(sampleCoord + caDir,        vec2(0.0), vec2(1.0))).r;
-        sampleColor.g = texture2D(u_image, sampleCoord).g;
-        sampleColor.b = texture2D(u_image, clamp(sampleCoord - caDir,        vec2(0.0), vec2(1.0))).b;
-        sampleColor.a = 1.0;
-
-        // ── Joint Bilateral: 깊이 + 밝기 차이로 경계 가중치 ─────────────
+        vec3 sR = texture2D(u_image, clamp(sampleCoord + caDir, vec2(0.0), vec2(1.0))).rgb;
+        vec3 sG = texture2D(u_image, sampleCoord).rgb;
+        vec3 sB = texture2D(u_image, clamp(sampleCoord - caDir, vec2(0.0), vec2(1.0))).rgb;
+        vec3 sampleColor = toLinear(vec3(sR.r, sG.g, sB.b));
         float sampleDepth = texture2D(u_depthMap, sampleCoord).r;
-        float sampleLuma  = dot(sampleColor.rgb, vec3(0.299, 0.587, 0.114));
+        float sampleCoC = abs(invZ(sampleDepth) - invFocal);
+        float sampleDiskPx = max(0.75, clamp(sampleCoC * COC_SCALE, 0.0, 1.0) * u_blurRadius);
+        float gatherW = 1.0 - smoothstep(sampleDiskPx, sampleDiskPx + GATHER_SOFT_PX, distPx);
 
-        float depthDiff = abs(sampleDepth - centerDepth);
-        float lumaDiff  = abs(sampleLuma  - centerLuma);
+        float sampleLuma = dot(sampleColor, vec3(0.299, 0.587, 0.114));
+        float lumaDiff   = abs(sampleLuma - centerLuma);
 
-        float edgeWeight = exp(-(depthDiff * depthDiff * 40.0)
-                              -(lumaDiff  * lumaDiff  *  10.0));
+        float dd = sampleDepth - centerDepth;
+        float edgeDepthW = 1.0;
+        if (centerInFocus) {
+          if (dd < 0.0) {
+            edgeDepthW = exp(-(dd * dd) * 25.0);
+          } else {
+            edgeDepthW = exp(-(dd * dd) * 8.0);
+          }
+        } else {
+          if (dd > 0.0) {
+            edgeDepthW = exp(-(dd * dd) * 5.0);
+          } else {
+            edgeDepthW = exp(-(dd * dd) * 18.0);
+          }
+        }
 
-        float bokehWeight = 1.0 + pow(max(0.0, sampleLuma - u_threshold), 2.0) * BOKEH_INTENSITY;
-        // Soap-bubble / rim: aperture 가장자리 샘플만 살짝 더 밝게(비눗방울 보케 느낌)
-        float weight = bokehWeight * edgeWeight * (1.0 + smoothstep(0.52, 0.94, length(shapePoint)) * 0.55);
+        float edgeWeight = edgeDepthW * exp(-(lumaDiff * lumaDiff) * 5.0);
+        float bokehWeight = 1.0;
+        if (sampleLuma > threshLin) {
+          float hiL = sampleLuma - threshLin;
+          bokehWeight += hiL * hiL * BOKEH_INTENSITY;
+        }
+        float onFocalOcc = 1.0;
+        if (!centerInFocus) {
+          if (sampleDepth > centerDepth + ONFOCAL_OCCLUDE_EPS) {
+            onFocalOcc = 0.0;
+          }
+        }
+        float rim = smoothstep(0.52, 0.94, length(shapePoint));
+        float shapeWeight = mix(0.7, 1.3, rim);
+        float weight = bokehWeight * edgeWeight * gatherW * onFocalOcc * shapeWeight;
 
-        color       += sampleColor.rgb * weight;
+        color       += sampleColor * weight;
         totalWeight += weight;
       }
 
-      // 초점면(Zero Blur): 가중 합이 없으면 원본 픽셀 100% (CA·오프셋 없음)
       if (totalWeight <= 0.0) {
-        gl_FragColor = texture2D(u_image, v_texCoord);
+        gl_FragColor = vec4(centerSrgb, 1.0);
         return;
       }
 
-      vec3 blurred = color / totalWeight;
-      // 경계 보호가 과하면 totalWeight가 작아져 노이즈·검게 죽는 현상 방지 → 원본 쪽으로 블렌딩
+      vec3 blurredLinear = color / totalWeight;
       float blurMix = smoothstep(0.35, 10.0, totalWeight);
-      vec3 outRgb = mix(centerColor, blurred, blurMix);
-      gl_FragColor = vec4(outRgb, 1.0);
+      vec3 mixedLinear = mix(centerColor, blurredLinear, blurMix);
+      gl_FragColor = vec4(toSrgb(mixedLinear), 1.0);
     }
   `;
 
@@ -890,9 +1080,8 @@ function renderLensBlurWebGL(
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sourceCanvas);
 
-  // JBU: 저해상도 깊이 맵을 guide 이미지 해상도로 엣지 보존 업샘플
-  const rawDepthCanvas = createDepthTextureCanvas(depthData, depthWidth, depthHeight);
-  const depthCanvas = upsampleDepthJBU(rawDepthCanvas, sourceCanvas);
+  // Mask-Guided JBU: 저해상도 깊이 맵을 guide 이미지 해상도로 엣지 보존 업샘플 (캐시 활용)
+  const depthCanvas = getOrComputeJBU(depthData, depthWidth, depthHeight, sourceCanvas.width, sourceCanvas.height, maskCanvas);
   const depthTexture = gl.createTexture();
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, depthTexture);
@@ -922,12 +1111,15 @@ function renderLensBlurWebGL(
 
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 
+  const snapshot = snapshotWebGLCanvasTo2D(glCanvas);
+
   if (texture) gl.deleteTexture(texture);
   if (depthTexture) gl.deleteTexture(depthTexture);
   if (buffer) gl.deleteBuffer(buffer);
   gl.deleteProgram(program);
+  gl.getExtension("WEBGL_lose_context")?.loseContext();
 
-  return glCanvas;
+  return snapshot;
 }
 
 export function compositeBlur(
@@ -967,6 +1159,11 @@ export function compositeBlur(
     return;
   }
 
+  // Mask-Guided JBU용 마스크 캔버스: subjectMask가 있으면 softData로 생성
+  const jbuMaskCanvas = subjectMask
+    ? buildMaskTextureCanvas(subjectMask, downscaledCanvas.width, downscaledCanvas.height)
+    : null;
+
   const lensBlurCanvas = renderLensBlurWebGL(
     downscaledCanvas,
     scaledBlurRadius,
@@ -974,7 +1171,8 @@ export function compositeBlur(
     depthWidth,
     depthHeight,
     bokehShape,
-    focusRange
+    focusRange,
+    jbuMaskCanvas
   );
 
   const blurLayer = makeCanvas(W, H);
@@ -982,19 +1180,13 @@ export function compositeBlur(
   blurCtx.imageSmoothingEnabled = true;
   blurCtx.imageSmoothingQuality = "high";
   blurCtx.drawImage(lensBlurCanvas, 0, 0, W, H);
+  applyFilmGrainToBlurLayer(blurCtx, W, H, blurInteractive);
 
-  const rawDepthCanvas = createDepthTextureCanvas(depthData, depthWidth, depthHeight);
-  let highResDepthCanvas: HTMLCanvasElement;
-  try {
-    highResDepthCanvas = upsampleDepthJBU(rawDepthCanvas, outCanvas);
-  } catch (e) {
-    console.warn("[compositeBlur] High-res JBU mask failed, linear depth fallback", e);
-    highResDepthCanvas = makeCanvas(W, H);
-    const depthCtx = highResDepthCanvas.getContext("2d")!;
-    depthCtx.imageSmoothingEnabled = true;
-    depthCtx.imageSmoothingQuality = "high";
-    depthCtx.drawImage(rawDepthCanvas, 0, 0, W, H);
-  }
+  // Mask-Guided JBU 고해상도 뎁스 맵 (캐시 활용: depthData + maskRef 동일 시 재사용)
+  const jbuMaskCanvasHR = subjectMask
+    ? buildMaskTextureCanvas(subjectMask, W, H)
+    : null;
+  const highResDepthCanvas = getOrComputeJBU(depthData, depthWidth, depthHeight, W, H, jbuMaskCanvasHR);
 
   const blurMask = renderBlurAlphaMaskWebGL(highResDepthCanvas, focusRange);
   blurCtx.globalCompositeOperation = "destination-in";
@@ -1010,6 +1202,38 @@ export function compositeBlur(
   }
 
   ctx.drawImage(blurLayer, 0, 0);
+}
+
+/**
+ * SubjectMask.softData(0–255)를 그레이스케일 캔버스로 변환한다.
+ * CSS blur 없이 순수 픽셀값을 사용 — BFS box blur로 이미 부드럽게 처리됨.
+ * JBU 셰이더의 u_mask(TEXTURE2)로 전달되어 경계 분리 가중치를 제공한다.
+ */
+function buildMaskTextureCanvas(
+  mask: SubjectMask,
+  targetW: number,
+  targetH: number
+): HTMLCanvasElement {
+  const raw = makeCanvas(mask.width, mask.height);
+  const rawCtx = raw.getContext("2d")!;
+  const imageData = rawCtx.createImageData(mask.width, mask.height);
+
+  for (let i = 0; i < mask.width * mask.height; i++) {
+    const val = mask.softData[i] ?? 0;
+    const base = i * 4;
+    imageData.data[base] = val;
+    imageData.data[base + 1] = val;
+    imageData.data[base + 2] = val;
+    imageData.data[base + 3] = 255;
+  }
+  rawCtx.putImageData(imageData, 0, 0);
+
+  const scaled = makeCanvas(targetW, targetH);
+  const scaledCtx = scaled.getContext("2d")!;
+  scaledCtx.imageSmoothingEnabled = true;
+  scaledCtx.imageSmoothingQuality = "high";
+  scaledCtx.drawImage(raw, 0, 0, targetW, targetH);
+  return scaled;
 }
 
 function buildSubjectLockCanvas(
@@ -1035,6 +1259,9 @@ function buildSubjectLockCanvas(
   const scaledCtx = scaled.getContext("2d")!;
   scaledCtx.imageSmoothingEnabled = true;
   scaledCtx.imageSmoothingQuality = "high";
+  // 외곽선을 픽셀 단위로 딱 자르지 않고 배경과 부드럽게 섞이도록 페더링
+  scaledCtx.filter = "blur(2px)";
   scaledCtx.drawImage(raw, 0, 0, targetW, targetH);
+  scaledCtx.filter = "none";
   return scaled;
 }

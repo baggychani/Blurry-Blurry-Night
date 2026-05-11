@@ -86,7 +86,9 @@ npx serve@14 out
 - **Tailwind CSS** — 다크 UI
 - **Framer Motion** — 하단 시트
 - **Transformers.js** (`@xenova/transformers`) — Depth Anything 계열 모델, Web Worker에서 추론
-- **WebGL** — 깊이 기반 보케·초점 범위
+- **WebGL** — 깊이 기반 보케·초점 범위  
+  - Joint Bilateral 업샘플에 마스크 가중(Mask-Guided JBU), 탭 영역은 `regionGrow`의 소프트 마스크로 경계 완화  
+  - 렌즈 블러: 선형 색 공간 합산, 역깊이 기준 CoC, Gather 근사·비대칭 깊이 가중, 가장자리 캣츠아이 왜곡, 초점 밖에서 가까운 샘플 차폐, 블러 레이어에만 경량 필름 그레인(인터랙티브 프리뷰 시 생략)
 - **PWA** (`@ducanh2912/next-pwa`) — 설치·오프라인 폴백(개발 모드에서는 SW 비활성화)
 
 ---
@@ -109,7 +111,8 @@ hooks/
 lib/
   depthWorker.ts
   depthWorkerInit.ts
-  webglComposite.ts
+  webglComposite.ts   # JBU·렌즈 블러·마스크 합성
+  regionGrow.ts       # 탭 기준 영역 마스크 + 소프트 에지
   canvasComposite.ts  # 레거시 Canvas 합성(보존)
   empty-node-stub.js  # 브라우저 번들용 Node 스텁
 scripts/
