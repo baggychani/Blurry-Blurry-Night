@@ -702,7 +702,7 @@ function renderBlurAlphaMaskWebGL(
     const depthPixels = depthCtx.getImageData(0, 0, W, H);
     const mask = fallbackCtx.createImageData(W, H);
     const [dFar, dNear] = focusRangeUiToDepthBounds(focusRange);
-    const edgeZone = 0.04;
+    const edgeZone = 0.07;
 
     for (let i = 0; i < W * H; i++) {
       const depth = depthPixels.data[i * 4] / 255;
@@ -749,7 +749,8 @@ function renderBlurAlphaMaskWebGL(
       float depth = texture2D(u_depthMap, v_texCoord).r;
 
       // 초점 경계까지의 거리 계산 → 경계 전이 구간(edgeZone)에서 smoothstep으로 부드럽게 전이
-      float edgeZone = 0.04;
+      // edgeZone을 0.07로 넓혀 MDE/JBU 경계 오차가 빚는 하드 컷 선을 완화한다.
+      float edgeZone = 0.07;
       float distToFocus = max(u_focusRange.x - depth, depth - u_focusRange.y);
       distToFocus = max(distToFocus, 0.0);
 
@@ -865,8 +866,10 @@ function renderLensBlurWebGL(
     const float DEPTH_EPS = 0.001;
     const float COC_SCALE = 0.18;
     const float GATHER_SOFT_PX = 3.0;
-    // On-focal occlusion (Dr. Bokeh 근사): 초점 밖 픽셀은 카메라 쪽(깊이 큼) 샘플이 가리면 수집 거절
+    // On-focal occlusion (Dr. Bokeh 근사): 초점 밖에서 카메라 쪽(깊이 큼) 샘플은 하드 컷 대신 소프트 감쇠
     const float ONFOCAL_OCCLUDE_EPS = 0.03;
+    const float ONFOCAL_OCCLUDE_SOFT_RAMP = 0.05;
+    const float WEIGHT_DIV_EPS = 1e-5;
 
     uniform sampler2D u_image;
     uniform sampler2D u_depthMap;
@@ -998,19 +1001,20 @@ function renderLensBlurWebGL(
         float edgeDepthW = 1.0;
         if (centerInFocus) {
           if (dd < 0.0) {
-            edgeDepthW = exp(-(dd * dd) * 25.0);
+            edgeDepthW = exp(-(dd * dd) * 15.0);
           } else {
-            edgeDepthW = exp(-(dd * dd) * 8.0);
+            edgeDepthW = exp(-(dd * dd) * 5.0);
           }
         } else {
           if (dd > 0.0) {
-            edgeDepthW = exp(-(dd * dd) * 5.0);
+            edgeDepthW = exp(-(dd * dd) * 3.0);
           } else {
-            edgeDepthW = exp(-(dd * dd) * 18.0);
+            edgeDepthW = exp(-(dd * dd) * 10.0);
           }
         }
 
-        float edgeWeight = edgeDepthW * exp(-(lumaDiff * lumaDiff) * 5.0);
+        // lumaDiff 계수를 5.0→3.0으로 낮춰 색상 경계에서의 이중 차단 완화 (Halo 감소)
+        float edgeWeight = edgeDepthW * exp(-(lumaDiff * lumaDiff) * 3.0);
         float bokehWeight = 1.0;
         if (sampleLuma > threshLin) {
           float hiL = sampleLuma - threshLin;
@@ -1018,9 +1022,11 @@ function renderLensBlurWebGL(
         }
         float onFocalOcc = 1.0;
         if (!centerInFocus) {
-          if (sampleDepth > centerDepth + ONFOCAL_OCCLUDE_EPS) {
-            onFocalOcc = 0.0;
-          }
+          onFocalOcc = 1.0 - smoothstep(
+            ONFOCAL_OCCLUDE_EPS,
+            ONFOCAL_OCCLUDE_EPS + ONFOCAL_OCCLUDE_SOFT_RAMP,
+            dd
+          );
         }
         float rim = smoothstep(0.52, 0.94, length(shapePoint));
         float shapeWeight = mix(0.7, 1.3, rim);
@@ -1030,13 +1036,10 @@ function renderLensBlurWebGL(
         totalWeight += weight;
       }
 
-      if (totalWeight <= 0.0) {
-        gl_FragColor = vec4(centerSrgb, 1.0);
-        return;
-      }
-
-      vec3 blurredLinear = color / totalWeight;
-      float blurMix = smoothstep(0.35, 10.0, totalWeight);
+      float safeW = max(totalWeight, WEIGHT_DIV_EPS);
+      vec3 blurredLinear = color / safeW;
+      // 하한을 0.35→0.1로 낮춰 가중치가 적은 경계 픽셀도 블러가 섞이도록 함 (원본으로 스냅 억제)
+      float blurMix = smoothstep(0.1, 8.0, totalWeight);
       vec3 mixedLinear = mix(centerColor, blurredLinear, blurMix);
       gl_FragColor = vec4(toSrgb(mixedLinear), 1.0);
     }

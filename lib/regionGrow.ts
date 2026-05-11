@@ -94,13 +94,13 @@ export function growRegionFromPoint(
     if (y < ph - 1) enqueue(idx + pw);
   }
 
-  return { data: mask, softData: softBlurMask(mask, pw, ph, 3), width: pw, height: ph };
+  return { data: mask, softData: softBlurMask(mask, pw, ph, 5), width: pw, height: ph };
 }
 
 /**
  * 2-pass separable box blur (horizontal → vertical).
  * Uint8Array binary mask(0/1)를 받아 0–255 soft mask로 반환한다.
- * radius=3: 7-tap, 512×512에서 약 3.7M ops (≈20ms 이내)
+ * radius=5: 11-tap (할로 완화를 위해 3→5), 512×512에서 연산량 증가
  */
 function softBlurMask(mask: Uint8Array, w: number, h: number, radius: number): Uint8Array {
   const size = w * h;

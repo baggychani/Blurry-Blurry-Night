@@ -74,13 +74,16 @@ export default function FocusRangeSlider({
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const draw = () => {
+    let rafId: number | undefined;
+    let retryCount = 0;
+
+    const paint = () => {
       const rect = canvas.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) return;
       const dpr = window.devicePixelRatio ?? 1;
       canvas.width = Math.round(rect.width * dpr);
       canvas.height = Math.round(rect.height * dpr);
-      const ctx = canvas.getContext("2d")!;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
       ctx.scale(dpr, dpr);
       const W = rect.width;
       const H = rect.height;
@@ -112,10 +115,30 @@ export default function FocusRangeSlider({
       }
     };
 
-    draw();
-    const ro = new ResizeObserver(draw);
+    // BottomSheet 진입 애니메이션 등으로 레이아웃이 아직 확정되지 않은 프레임에서
+    // getBoundingClientRect()가 0을 반환하면 다음 프레임에 재시도한다.
+    // ResizeObserver는 치수 변경 시 추가 트리거를 제공한다.
+    const draw = () => {
+      rafId = undefined;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) {
+        if (retryCount < 12) {
+          retryCount++;
+          rafId = requestAnimationFrame(draw);
+        }
+        return;
+      }
+      retryCount = 0;
+      paint();
+    };
+
+    rafId = requestAnimationFrame(draw);
+    const ro = new ResizeObserver(paint);
     ro.observe(canvas);
-    return () => ro.disconnect();
+    return () => {
+      if (rafId !== undefined) cancelAnimationFrame(rafId);
+      ro.disconnect();
+    };
   }, [histogramData]);
 
   const getPercent = (clientX: number): number => {

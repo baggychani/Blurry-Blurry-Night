@@ -25,10 +25,11 @@ function clampPercent(value: number): number {
 
 function depthValueToFocusRange(depthValue: number): [number, number] {
   // UI는 왼쪽=가까움(depth 1), 오른쪽=멀리(depth 0)이므로 depth를 UI percent로 뒤집는다.
+  // Math.round로 정수화 → 드래그 핸들과 동일한 표시 포맷 유지
   const focusCenter = clampPercent(100 - (depthValue / 255) * 100);
   return [
-    clampPercent(focusCenter - FOCUS_TAP_WINDOW),
-    clampPercent(focusCenter + FOCUS_TAP_WINDOW),
+    clampPercent(Math.round(focusCenter - FOCUS_TAP_WINDOW)),
+    clampPercent(Math.round(focusCenter + FOCUS_TAP_WINDOW)),
   ];
 }
 
@@ -45,6 +46,8 @@ function sampleDepthRangeAt(
 export default function Home() {
   const [uploadedImage, setUploadedImage] = useState<HTMLImageElement | null>(null);
   const [blurRadius, setBlurRadius] = useState(10);
+  // blurRadiusRef: 이벤트 핸들러 내 최신값 동기 참조용 (focusRangeRef와 동일 패턴)
+  const blurRadiusRef = useRef(10);
   const [isProcessing, setIsProcessing] = useState(false);
   const [maskMode, setMaskMode] = useState(false);
   const [bokehShape, setBokehShape] = useState(0);
@@ -372,6 +375,7 @@ export default function Home() {
   // ── 블러 슬라이더 ─────────────────────────────────────────────────────────
   const handleBlurChange = useCallback(
     (value: number) => {
+      blurRadiusRef.current = value;
       setBlurRadius(value);
       if (uploadedImage && !isProcessing) {
         renderResult(uploadedImage, value);
@@ -383,10 +387,13 @@ export default function Home() {
 
   useEffect(() => {
     if (uploadedImage && !isProcessing && !maskMode) {
-      renderResult(uploadedImage, blurRadius);
+      // blurRadius는 handleBlurChange에서 직접 처리하므로 여기서 제외 (이중 렌더 방지)
+      // bokehShape 변경은 renderResult deps에 포함되어 renderResult 교체 시 실행됨
+      renderResult(uploadedImage, blurRadiusRef.current);
       setResultVersion((version) => version + 1);
     }
-  }, [bokehShape, uploadedImage, isProcessing, maskMode, blurRadius, renderResult]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uploadedImage, isProcessing, maskMode, renderResult]);
 
   // ── 마스크 모드 토글 ─────────────────────────────────────────────────────
   const handleMaskModeToggle = useCallback(() => {
