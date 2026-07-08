@@ -29,6 +29,9 @@ const MAX_WEBGL_INPUT_EDGE = 1024;
 /** 초점 조절 중 블러 패스 긴 변 상한 */
 const INTERACTIVE_BLUR_MAX_EDGE = 768;
 const BLUR_SLIDER_MAX = 30;
+const FINAL_LENS_BLUR_SAMPLES = 96;
+const INTERACTIVE_LENS_BLUR_SAMPLES = 40;
+const MAX_LENS_BLUR_CACHE_ENTRIES = 24;
 
 /**
  * JBU 캐시: depthData 레퍼런스 + maskRef가 둘 다 일치할 때만 재사용.
@@ -40,6 +43,23 @@ const jbuCache = new WeakMap<
 >();
 const maskTextureCanvasCache = new WeakMap<SubjectMask, Map<string, HTMLCanvasElement>>();
 const subjectLockCanvasCache = new WeakMap<SubjectMask, Map<string, HTMLCanvasElement>>();
+const downscaledImageCache = new WeakMap<
+  HTMLImageElement,
+  Map<number, { canvas: HTMLCanvasElement; scale: number }>
+>();
+const lensBlurCache = new WeakMap<Uint8Array, Map<string, HTMLCanvasElement>>();
+const canvasCacheIds = new WeakMap<HTMLCanvasElement, number>();
+let nextCanvasCacheId = 1;
+
+function getCanvasCacheId(canvas: HTMLCanvasElement | null): number {
+  if (!canvas) return 0;
+  const cached = canvasCacheIds.get(canvas);
+  if (cached) return cached;
+
+  const id = nextCanvasCacheId++;
+  canvasCacheIds.set(canvas, id);
+  return id;
+}
 
 function getCachedMaskCanvas(
   cache: WeakMap<SubjectMask, Map<string, HTMLCanvasElement>>,
@@ -257,6 +277,10 @@ function createDownscaledCanvas(
   canvas: HTMLCanvasElement;
   scale: number;
 } {
+  const cachedByEdge = downscaledImageCache.get(image);
+  const cached = cachedByEdge?.get(maxInputEdge);
+  if (cached) return cached;
+
   const W = image.naturalWidth;
   const H = image.naturalHeight;
   const longEdge = Math.max(W, H);
@@ -270,7 +294,14 @@ function createDownscaledCanvas(
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(image, 0, 0, scaledW, scaledH);
 
-  return { canvas, scale };
+  const result = { canvas, scale };
+  let byEdge = cachedByEdge;
+  if (!byEdge) {
+    byEdge = new Map();
+    downscaledImageCache.set(image, byEdge);
+  }
+  byEdge.set(maxInputEdge, result);
+  return result;
 }
 
 function createDepthTextureCanvas(
@@ -863,8 +894,23 @@ function renderLensBlurWebGL(
   depthHeight: number,
   bokehShape: number,
   focusRange: [number, number],
-  maskCanvas: HTMLCanvasElement | null
+  maskCanvas: HTMLCanvasElement | null,
+  sampleCount: number
 ): HTMLCanvasElement {
+  const cacheKey = [
+    sourceCanvas.width,
+    sourceCanvas.height,
+    blurRadius.toFixed(3),
+    bokehShape,
+    focusRange[0],
+    focusRange[1],
+    getCanvasCacheId(maskCanvas),
+    sampleCount,
+  ].join("|");
+  let byParams = lensBlurCache.get(depthData);
+  const cached = byParams?.get(cacheKey);
+  if (cached) return cached;
+
   const glCanvas = makeCanvas(sourceCanvas.width, sourceCanvas.height);
   const gl = glCanvas.getContext("webgl", {
     alpha: false,
@@ -892,7 +938,7 @@ function renderLensBlurWebGL(
   const fragmentSource = `
     precision highp float;
 
-    const int SAMPLES = 64;
+    const int SAMPLES = ${sampleCount};
     const float GOLDEN_ANGLE = 2.39996323;
     const float PI = 3.14159265359;
     const float GAMMA = 2.2;
@@ -1157,6 +1203,16 @@ function renderLensBlurWebGL(
 
   const snapshot = snapshotWebGLCanvasTo2D(glCanvas);
 
+  if (!byParams) {
+    byParams = new Map();
+    lensBlurCache.set(depthData, byParams);
+  }
+  byParams.set(cacheKey, snapshot);
+  if (byParams.size > MAX_LENS_BLUR_CACHE_ENTRIES) {
+    const oldestKey = byParams.keys().next().value;
+    if (oldestKey) byParams.delete(oldestKey);
+  }
+
   if (texture) gl.deleteTexture(texture);
   if (depthTexture) gl.deleteTexture(depthTexture);
   if (buffer) gl.deleteBuffer(buffer);
@@ -1193,6 +1249,9 @@ export function compositeBlur(
   const ctx = outCanvas.getContext("2d")!;
 
   const maxEdge = blurInteractive ? INTERACTIVE_BLUR_MAX_EDGE : MAX_WEBGL_INPUT_EDGE;
+  const lensBlurSamples = blurInteractive
+    ? INTERACTIVE_LENS_BLUR_SAMPLES
+    : FINAL_LENS_BLUR_SAMPLES;
   const { canvas: downscaledCanvas, scale } = createDownscaledCanvas(image, maxEdge);
   const scaledBlurRadius = actualBlur * scale;
   const edgeZone = focusFeatherToEdgeZone(focusFeather);
@@ -1218,7 +1277,8 @@ export function compositeBlur(
     depthHeight,
     bokehShape,
     focusRange,
-    jbuMaskCanvas
+    jbuMaskCanvas,
+    lensBlurSamples
   );
 
   const blurLayer = makeCanvas(W, H);
