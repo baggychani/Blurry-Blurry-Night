@@ -6,7 +6,7 @@
  */
 
 export interface RegionMask {
-  data: Uint8Array;     // 1 = 선택 영역, 0 = 배경 (binary)
+  data: Uint8Array; // 1 = 선택 영역, 0 = 배경 (binary)
   softData: Uint8Array; // 0–255 soft edge (BFS 후 2-pass box blur)
   width: number;
   height: number;
@@ -14,8 +14,8 @@ export interface RegionMask {
 
 const WORK_MAX_EDGE = 512;
 const COLOR_DIST_THRESHOLD = 45; // 0-441 범위, RGB 유클리드 거리
-const LUMA_DIST_THRESHOLD = 50;  // 시드 밝기와의 절대 차이
-const MAX_REGION_RATIO = 0.45;   // 이미지 전체 픽셀 대비 최대 영역 비율
+const LUMA_DIST_THRESHOLD = 50; // 시드 밝기와의 절대 차이
+const MAX_REGION_RATIO = 0.45; // 이미지 전체 픽셀 대비 최대 영역 비율
 
 export function growRegionFromPoint(
   image: HTMLImageElement,
@@ -88,9 +88,9 @@ export function growRegionFromPoint(
     mask[idx] = 1;
     count++;
 
-    if (x > 0)      enqueue(idx - 1);
+    if (x > 0) enqueue(idx - 1);
     if (x < pw - 1) enqueue(idx + 1);
-    if (y > 0)      enqueue(idx - pw);
+    if (y > 0) enqueue(idx - pw);
     if (y < ph - 1) enqueue(idx + pw);
   }
 
@@ -102,7 +102,12 @@ export function growRegionFromPoint(
  * Uint8Array binary mask(0/1)를 받아 0–255 soft mask로 반환한다.
  * radius=5: 11-tap (할로 완화를 위해 3→5), 512×512에서 연산량 증가
  */
-function softBlurMask(mask: Uint8Array, w: number, h: number, radius: number): Uint8Array {
+function softBlurMask(
+  mask: Uint8Array,
+  w: number,
+  h: number,
+  radius: number
+): Uint8Array {
   const size = w * h;
   const tmp = new Float32Array(size);
   const tap = radius * 2 + 1;

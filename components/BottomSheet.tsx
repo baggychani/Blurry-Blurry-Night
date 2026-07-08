@@ -7,6 +7,8 @@ import FocusRangeSlider from "./FocusRangeSlider";
 interface BottomSheetProps {
   blurRadius: number;
   onBlurChange: (value: number) => void;
+  focusFeather: number;
+  onFocusFeatherChange: (value: number) => void;
   onNewImage: () => void;
   onDownload: () => void;
   isProcessing: boolean;
@@ -24,6 +26,7 @@ interface BottomSheetProps {
 }
 
 const BLUR_MAX = 30;
+const FEATHER_MAX = 100;
 
 /** 접힘/펼침 모두 동일 — 새 사진·저장 버튼 공통 스타일 */
 const PRIMARY_BTN_NEW =
@@ -44,13 +47,34 @@ function PrimaryActionRow({
 }) {
   return (
     <div className="grid grid-cols-2 gap-3">
-      <button type="button" onClick={onNewImage} disabled={isProcessing} className={PRIMARY_BTN_NEW}>
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-4 w-4 shrink-0">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
+      <button
+        type="button"
+        onClick={onNewImage}
+        disabled={isProcessing}
+        className={PRIMARY_BTN_NEW}
+      >
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          fill="none"
+          viewBox="0 0 24 24"
+          strokeWidth={2}
+          stroke="currentColor"
+          className="h-4 w-4 shrink-0"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"
+          />
         </svg>
         새 사진
       </button>
-      <button type="button" onClick={onDownload} disabled={isProcessing || maskMode} className={PRIMARY_BTN_SAVE}>
+      <button
+        type="button"
+        onClick={onDownload}
+        disabled={isProcessing || maskMode}
+        className={PRIMARY_BTN_SAVE}
+      >
         {isProcessing ? (
           <>
             <span className="inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-black/30 border-t-black" />
@@ -58,8 +82,19 @@ function PrimaryActionRow({
           </>
         ) : (
           <>
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-4 w-4 shrink-0">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M8.25 9.75 12 13.5m0 0 3.75-3.75M12 13.5V3" />
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={2}
+              stroke="currentColor"
+              className="h-4 w-4 shrink-0"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M8.25 9.75 12 13.5m0 0 3.75-3.75M12 13.5V3"
+              />
             </svg>
             저장하기
           </>
@@ -120,6 +155,8 @@ function BokehShapeGlyph({ shapeId }: { shapeId: number }) {
 export default function BottomSheet({
   blurRadius,
   onBlurChange,
+  focusFeather,
+  onFocusFeatherChange,
   onNewImage,
   onDownload,
   isProcessing,
@@ -164,7 +201,11 @@ export default function BottomSheet({
             animate={{ rotate: panelOpen ? 0 : 180 }}
             transition={{ type: "spring", stiffness: 300, damping: 25 }}
           >
-            <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5" />
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="m4.5 15.75 7.5-7.5 7.5 7.5"
+            />
           </motion.svg>
         </button>
       </div>
@@ -209,7 +250,9 @@ export default function BottomSheet({
                 className="flex w-full items-center justify-between py-0.5 text-left disabled:opacity-40"
               >
                 <div className="flex items-center gap-1.5">
-                  <span className="text-zinc-400 text-xs font-medium leading-none">보케 모양</span>
+                  <span className="text-zinc-400 text-xs font-medium leading-none">
+                    보케 모양
+                  </span>
                   {/* 현재 선택된 보케 미리보기 */}
                   <span className="text-zinc-500 flex items-center w-3.5 h-3.5">
                     <BokehShapeGlyph shapeId={bokehShape} />
@@ -225,7 +268,11 @@ export default function BottomSheet({
                   animate={{ rotate: bokehOpen ? 0 : 180 }}
                   transition={{ type: "spring", stiffness: 300, damping: 25 }}
                 >
-                  <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 15.75 7.5-7.5 7.5 7.5" />
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="m4.5 15.75 7.5-7.5 7.5 7.5"
+                  />
                 </motion.svg>
               </button>
               <AnimatePresence initial={false}>
@@ -235,7 +282,12 @@ export default function BottomSheet({
                     initial={{ opacity: 0, height: 0 }}
                     animate={{ opacity: 1, height: "auto" }}
                     exit={{ opacity: 0, height: 0 }}
-                    transition={{ type: "spring", stiffness: 300, damping: 30, mass: 0.8 }}
+                    transition={{
+                      type: "spring",
+                      stiffness: 300,
+                      damping: 30,
+                      mass: 0.8,
+                    }}
                     style={{ overflow: "hidden" }}
                     className="pt-2"
                   >
@@ -277,7 +329,9 @@ export default function BottomSheet({
                 type="button"
                 onClick={onTapFocusModeToggle}
                 disabled={isProcessing || maskMode}
-                title={tapFocusMode ? "탭 초점 끄기 (비교 슬라이더)" : "탭으로 초점 맞추기"}
+                title={
+                  tapFocusMode ? "탭 초점 끄기 (비교 슬라이더)" : "탭으로 초점 맞추기"
+                }
                 className={`
                   min-h-[2.75rem] flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-2
                   text-[13px] font-medium rounded-xl py-2 px-2 sm:px-3 text-center leading-tight
@@ -306,7 +360,9 @@ export default function BottomSheet({
                 <span className="hidden sm:inline">
                   {tapFocusMode ? "탭 초점 끄기" : "탭으로 초점 맞추기"}
                 </span>
-                <span className="sm:hidden">{tapFocusMode ? "탭 초점 끄기" : "탭 초점"}</span>
+                <span className="sm:hidden">
+                  {tapFocusMode ? "탭 초점 끄기" : "탭 초점"}
+                </span>
               </button>
               <button
                 type="button"
@@ -343,7 +399,9 @@ export default function BottomSheet({
                     d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"
                   />
                 </svg>
-                <span className="hidden sm:inline">{maskMode ? "거리 맵 종료" : "거리 맵 확인"}</span>
+                <span className="hidden sm:inline">
+                  {maskMode ? "거리 맵 종료" : "거리 맵 확인"}
+                </span>
                 <span className="sm:hidden">{maskMode ? "맵 끄기" : "거리 맵"}</span>
               </button>
             </div>
@@ -413,6 +471,39 @@ export default function BottomSheet({
               </div>
             </div>
 
+            <div className="mb-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-white text-sm font-medium">경계 부드러움</span>
+                <span className="text-zinc-500 text-xs tabular-nums">
+                  {focusFeather}%
+                </span>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <div className="h-4 w-4 shrink-0 rounded-sm border border-zinc-500" />
+                <div className="relative flex-1 h-5 flex items-center">
+                  <div className="absolute left-0 right-0 h-1.5 rounded-full bg-zinc-600" />
+                  <div
+                    className="absolute left-0 h-1.5 rounded-full bg-sky-300"
+                    style={{ width: `${(focusFeather / FEATHER_MAX) * 100}%` }}
+                  />
+                  <input
+                    type="range"
+                    min={0}
+                    max={FEATHER_MAX}
+                    step={1}
+                    value={focusFeather}
+                    onChange={(e) => onFocusFeatherChange(Number(e.target.value))}
+                    className="absolute inset-0 w-full opacity-0 cursor-pointer h-full"
+                  />
+                  <div
+                    className="absolute w-5 h-5 rounded-full bg-sky-100 shadow-md border border-sky-200 -translate-x-1/2 pointer-events-none"
+                    style={{ left: `${(focusFeather / FEATHER_MAX) * 100}%` }}
+                  />
+                </div>
+                <div className="h-4 w-4 shrink-0 rounded-full border border-sky-300 bg-sky-300/20" />
+              </div>
+            </div>
             <PrimaryActionRow
               isProcessing={isProcessing}
               maskMode={maskMode}

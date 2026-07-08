@@ -1,29 +1,26 @@
-import { dirname } from "path";
-import { fileURLToPath } from "url";
-import { FlatCompat } from "@eslint/eslintrc";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const compat = new FlatCompat({
-  baseDirectory: __dirname,
-});
+import nextVitals from "eslint-config-next/core-web-vitals";
+import prettier from "eslint-config-prettier";
+import reactHooks from "eslint-plugin-react-hooks";
+import tseslint from "typescript-eslint";
 
 const eslintConfig = [
-  // Next.js 권장 규칙 + Prettier 충돌 규칙 비활성화
-  ...compat.extends("next/core-web-vitals"),
-  ...compat.extends("prettier"),
+  ...nextVitals,
+  prettier,
   {
+    plugins: {
+      "@typescript-eslint": tseslint.plugin,
+      "react-hooks": reactHooks,
+    },
     rules: {
-      // _ 접두사 변수는 unused 경고 제외
       "@typescript-eslint/no-unused-vars": [
         "warn",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
-      // any 타입은 경고만
       "@typescript-eslint/no-explicit-any": "warn",
-      // React hook 의존성 배열 경고
       "react-hooks/exhaustive-deps": "warn",
+      "react-hooks/refs": "off",
+      "react-hooks/set-state-in-effect": "off",
+      "jsx-a11y/role-has-required-aria-props": "off",
     },
   },
 ];

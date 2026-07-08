@@ -137,11 +137,13 @@ export function useDepth() {
 
     worker.postMessage({ type: "load" });
 
+    const pendingRequests = pendingRef.current;
+
     return () => {
-      pendingRef.current.forEach((pending) => {
+      pendingRequests.forEach((pending) => {
         pending.reject(new Error("Depth worker was terminated"));
       });
-      pendingRef.current.clear();
+      pendingRequests.clear();
       worker.terminate();
       workerRef.current = null;
     };

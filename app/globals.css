@@ -24,31 +24,31 @@ body {
 }
 
 /* 슬라이더: 브라우저 기본 UI 완전 숨김 → BottomSheet에서 커스텀 트랙/썸 사용 */
-input[type='range'] {
+input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
   background: transparent;
   cursor: pointer;
 }
 
-input[type='range']::-webkit-slider-track {
+input[type="range"]::-webkit-slider-track {
   background: transparent;
   height: 20px;
 }
 
-input[type='range']::-webkit-slider-thumb {
+input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
   width: 0;
   height: 0;
 }
 
-input[type='range']::-moz-range-track {
+input[type="range"]::-moz-range-track {
   background: transparent;
   height: 20px;
 }
 
-input[type='range']::-moz-range-thumb {
+input[type="range"]::-moz-range-thumb {
   width: 0;
   height: 0;
   border: none;

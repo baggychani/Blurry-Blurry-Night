@@ -52,11 +52,14 @@ export default function CompareSlider({
     canvas.getContext("2d")?.drawImage(resultCanvas, 0, 0);
   }, [resultCanvas, renderKey]);
 
-  const getRelativeX = useCallback((clientX: number): number => {
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return splitX;
-    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-  }, [splitX]);
+  const getRelativeX = useCallback(
+    (clientX: number): number => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return splitX;
+      return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    },
+    [splitX]
+  );
 
   const getImagePoint = useCallback(
     (clientX: number, clientY: number): { xRatio: number; yRatio: number } | null => {
@@ -65,8 +68,10 @@ export default function CompareSlider({
 
       const imageAspect = originalImage.naturalWidth / originalImage.naturalHeight;
       const containerAspect = rect.width / rect.height;
-      const displayW = containerAspect > imageAspect ? rect.height * imageAspect : rect.width;
-      const displayH = containerAspect > imageAspect ? rect.height : rect.width / imageAspect;
+      const displayW =
+        containerAspect > imageAspect ? rect.height * imageAspect : rect.width;
+      const displayH =
+        containerAspect > imageAspect ? rect.height : rect.width / imageAspect;
       const offsetX = rect.left + (rect.width - displayW) / 2;
       const offsetY = rect.top + (rect.height - displayH) / 2;
       const xRatio = (clientX - offsetX) / displayW;
@@ -81,13 +86,16 @@ export default function CompareSlider({
     [originalImage]
   );
 
-  const onHandlePointerDown = useCallback((e: React.PointerEvent) => {
-    if (tapFocusMode) return;
-    e.stopPropagation();
-    e.preventDefault();
-    handleDraggingRef.current = true;
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-  }, [tapFocusMode]);
+  const onHandlePointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (tapFocusMode) return;
+      e.stopPropagation();
+      e.preventDefault();
+      handleDraggingRef.current = true;
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    },
+    [tapFocusMode]
+  );
 
   const onHandlePointerMove = useCallback(
     (e: React.PointerEvent) => {
@@ -179,18 +187,21 @@ export default function CompareSlider({
     [getImagePoint, getRelativeX, onTapFocus, tapFocusMode]
   );
 
-  const onContainerPointerCancel = useCallback((e: React.PointerEvent) => {
-    if (tapFocusMode) {
-      try {
-        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-      } catch {
-        /* ignore */
+  const onContainerPointerCancel = useCallback(
+    (e: React.PointerEvent) => {
+      if (tapFocusMode) {
+        try {
+          (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+        } catch {
+          /* ignore */
+        }
       }
-    }
-    pointerStartRef.current = null;
-    movedPastThresholdRef.current = false;
-    handleDraggingRef.current = false;
-  }, [tapFocusMode]);
+      pointerStartRef.current = null;
+      movedPastThresholdRef.current = false;
+      handleDraggingRef.current = false;
+    },
+    [tapFocusMode]
+  );
 
   const splitPercent = `${(splitX * 100).toFixed(2)}%`;
   const showSplit = !tapFocusMode;
@@ -199,7 +210,9 @@ export default function CompareSlider({
     <div
       ref={containerRef}
       className={`relative w-full h-full overflow-hidden rounded-2xl select-none ${
-        tapFocusMode ? "cursor-crosshair touch-manipulation" : "cursor-col-resize touch-manipulation"
+        tapFocusMode
+          ? "cursor-crosshair touch-manipulation"
+          : "cursor-col-resize touch-manipulation"
       }`}
       style={{ touchAction: "manipulation" }}
       onPointerDown={onContainerPointerDown}

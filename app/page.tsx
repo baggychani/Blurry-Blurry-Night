@@ -38,14 +38,21 @@ function sampleDepthRangeAt(
   xRatio: number,
   yRatio: number
 ): [number, number] {
-  const x = Math.max(0, Math.min(depth.width - 1, Math.round(xRatio * (depth.width - 1))));
-  const y = Math.max(0, Math.min(depth.height - 1, Math.round(yRatio * (depth.height - 1))));
+  const x = Math.max(
+    0,
+    Math.min(depth.width - 1, Math.round(xRatio * (depth.width - 1)))
+  );
+  const y = Math.max(
+    0,
+    Math.min(depth.height - 1, Math.round(yRatio * (depth.height - 1)))
+  );
   return depthValueToFocusRange(depth.data[y * depth.width + x] ?? 0);
 }
 
 export default function Home() {
   const [uploadedImage, setUploadedImage] = useState<HTMLImageElement | null>(null);
   const [blurRadius, setBlurRadius] = useState(10);
+  const [focusFeather, setFocusFeather] = useState(40);
   // blurRadiusRef: 이벤트 핸들러 내 최신값 동기 참조용 (focusRangeRef와 동일 패턴)
   const blurRadiusRef = useRef(10);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -73,6 +80,7 @@ export default function Home() {
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
   const maskOverlayRafRef = useRef(0);
   const resultInteractiveRafRef = useRef(0);
+  const blurCommitTimerRef = useRef<number | null>(null);
   const subjectMaskRef = useRef<SubjectMask | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -81,11 +89,7 @@ export default function Home() {
 
   // ── 블러 결과를 resultCanvas에 그리기 ─────────────────────────────────────
   const renderResult = useCallback(
-    (
-      img: HTMLImageElement,
-      blur: number,
-      opts?: { blurInteractive?: boolean }
-    ) => {
+    (img: HTMLImageElement, blur: number, opts?: { blurInteractive?: boolean }) => {
       if (!resultCanvasRef.current) {
         resultCanvasRef.current = document.createElement("canvas");
       }
@@ -113,10 +117,11 @@ export default function Home() {
         bokehShape,
         focusRange: focusRangeRef.current,
         blurInteractive: opts?.blurInteractive ?? false,
+        focusFeather,
         subjectMask: subjectMaskRef.current,
       });
     },
-    [bokehShape]
+    [bokehShape, focusFeather]
   );
 
   // ── 마스크 오버레이를 maskCanvas에 그리기 ─────────────────────────────────
@@ -166,6 +171,9 @@ export default function Home() {
       if (resultInteractiveRafRef.current) {
         cancelAnimationFrame(resultInteractiveRafRef.current);
       }
+      if (blurCommitTimerRef.current !== null) {
+        window.clearTimeout(blurCommitTimerRef.current);
+      }
       resultInteractiveRafRef.current = requestAnimationFrame(() => {
         resultInteractiveRafRef.current = 0;
         renderResult(img, blur, { blurInteractive: true });
@@ -182,6 +190,9 @@ export default function Home() {
       }
       if (resultInteractiveRafRef.current) {
         cancelAnimationFrame(resultInteractiveRafRef.current);
+      }
+      if (blurCommitTimerRef.current !== null) {
+        window.clearTimeout(blurCommitTimerRef.current);
       }
     };
   }, []);
@@ -314,14 +325,7 @@ export default function Home() {
       }
       setResultVersion((v) => v + 1);
     },
-    [
-      uploadedImage,
-      isProcessing,
-      maskMode,
-      blurRadius,
-      renderMaskOverlay,
-      renderResult,
-    ]
+    [uploadedImage, isProcessing, maskMode, blurRadius, renderMaskOverlay, renderResult]
   );
 
   const handleTapFocus = useCallback(
@@ -362,14 +366,7 @@ export default function Home() {
         setResultVersion((v) => v + 1);
       }
     },
-    [
-      uploadedImage,
-      isProcessing,
-      maskMode,
-      blurRadius,
-      renderMaskOverlay,
-      renderResult,
-    ]
+    [uploadedImage, isProcessing, maskMode, blurRadius, renderMaskOverlay, renderResult]
   );
 
   // ── 블러 슬라이더 ─────────────────────────────────────────────────────────
@@ -377,12 +374,45 @@ export default function Home() {
     (value: number) => {
       blurRadiusRef.current = value;
       setBlurRadius(value);
-      if (uploadedImage && !isProcessing) {
-        renderResult(uploadedImage, value);
-        setResultVersion((version) => version + 1);
+
+      if (blurCommitTimerRef.current !== null) {
+        window.clearTimeout(blurCommitTimerRef.current);
+        blurCommitTimerRef.current = null;
+      }
+
+      if (uploadedImage && !isProcessing && !maskMode) {
+        scheduleResultInteractive(uploadedImage, value);
+        blurCommitTimerRef.current = window.setTimeout(() => {
+          blurCommitTimerRef.current = null;
+          renderResult(uploadedImage, value, { blurInteractive: false });
+          setResultVersion((version) => version + 1);
+        }, 180);
       }
     },
-    [uploadedImage, isProcessing, renderResult]
+    [uploadedImage, isProcessing, maskMode, scheduleResultInteractive, renderResult]
+  );
+
+  const handleFocusFeatherChange = useCallback(
+    (value: number) => {
+      setFocusFeather(value);
+
+      if (blurCommitTimerRef.current !== null) {
+        window.clearTimeout(blurCommitTimerRef.current);
+        blurCommitTimerRef.current = null;
+      }
+
+      if (uploadedImage && !isProcessing && !maskMode) {
+        scheduleResultInteractive(uploadedImage, blurRadiusRef.current);
+        blurCommitTimerRef.current = window.setTimeout(() => {
+          blurCommitTimerRef.current = null;
+          renderResult(uploadedImage, blurRadiusRef.current, {
+            blurInteractive: false,
+          });
+          setResultVersion((version) => version + 1);
+        }, 180);
+      }
+    },
+    [uploadedImage, isProcessing, maskMode, scheduleResultInteractive, renderResult]
   );
 
   useEffect(() => {
@@ -392,7 +422,6 @@ export default function Home() {
       renderResult(uploadedImage, blurRadiusRef.current);
       setResultVersion((version) => version + 1);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uploadedImage, isProcessing, maskMode, renderResult]);
 
   // ── 마스크 모드 토글 ─────────────────────────────────────────────────────
@@ -475,7 +504,7 @@ export default function Home() {
                     resultCanvas={resultCanvasRef.current}
                     tapFocusMode={tapFocusMode}
                     onTapFocus={handleTapFocus}
-                    renderKey={`${blurRadius}-${bokehShape}-${focusRange[0]}-${focusRange[1]}-${resultVersion}`}
+                    renderKey={`${blurRadius}-${focusFeather}-${bokehShape}-${focusRange[0]}-${focusRange[1]}-${resultVersion}`}
                   />
                   {!tapFocusMode && !hasTappedFocus && !isProcessing && (
                     <div className="absolute bottom-4 inset-x-0 flex justify-center pointer-events-none z-10">
@@ -502,6 +531,8 @@ export default function Home() {
           <BottomSheet
             blurRadius={blurRadius}
             onBlurChange={handleBlurChange}
+            focusFeather={focusFeather}
+            onFocusFeatherChange={handleFocusFeatherChange}
             onNewImage={handleNewImageClick}
             onDownload={handleDownload}
             isProcessing={isProcessing}

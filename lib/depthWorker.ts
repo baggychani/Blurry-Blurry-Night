@@ -115,44 +115,132 @@ function extractDepthImage(result: unknown): RawDepthImage {
   return depth;
 }
 
-function normalizeDepth(depth: RawDepthImage): Uint8Array {
-  const source = depth.data;
-  const pixelCount = depth.width * depth.height;
-  const output = new Uint8Array(pixelCount);
+function stretchUint8Depth(values: Uint8Array): Uint8Array {
+  const pixelCount = values.length;
+  const hist = new Uint32Array(256);
+  for (let i = 0; i < pixelCount; i++) hist[values[i]]++;
 
-  if (source instanceof Uint8Array || source instanceof Uint8ClampedArray) {
-    if (source.length === pixelCount) {
-      output.set(source);
-      return output;
+  const lowTarget = Math.max(0, Math.floor(pixelCount * 0.01));
+  const highTarget = Math.max(0, Math.floor(pixelCount * 0.99));
+  let cumulative = 0;
+  let low = 0;
+  let high = 255;
+
+  for (let i = 0; i < 256; i++) {
+    cumulative += hist[i];
+    if (cumulative >= lowTarget) {
+      low = i;
+      break;
     }
-
-    if (source.length >= pixelCount * 4) {
-      for (let i = 0; i < pixelCount; i++) {
-        output[i] = source[i * 4];
-      }
-      return output;
-    }
-
-    output.set(source.slice(0, pixelCount));
-    return output;
   }
 
+  cumulative = 0;
+  for (let i = 0; i < 256; i++) {
+    cumulative += hist[i];
+    if (cumulative >= highTarget) {
+      high = i;
+      break;
+    }
+  }
+
+  if (high - low < 8) return values;
+
+  const output = new Uint8Array(pixelCount);
+  const range = high - low;
+  for (let i = 0; i < pixelCount; i++) {
+    output[i] = Math.max(0, Math.min(255, Math.round(((values[i] - low) / range) * 255)));
+  }
+  return output;
+}
+
+function stretchFloatDepth(source: Float32Array, pixelCount: number): Uint8Array {
   let min = Infinity;
   let max = -Infinity;
   for (let i = 0; i < pixelCount; i++) {
     const value = source[i];
+    if (!Number.isFinite(value)) continue;
     if (value < min) min = value;
     if (value > max) max = value;
   }
 
-  const range = Math.max(1e-6, max - min);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || max - min < 1e-6) {
+    return new Uint8Array(pixelCount);
+  }
+
+  const bins = 1024;
+  const hist = new Uint32Array(bins);
+  const rawRange = max - min;
   for (let i = 0; i < pixelCount; i++) {
-    output[i] = Math.max(0, Math.min(255, Math.round(((source[i] - min) / range) * 255)));
+    const value = source[i];
+    if (!Number.isFinite(value)) continue;
+    const bin = Math.max(
+      0,
+      Math.min(bins - 1, Math.floor(((value - min) / rawRange) * (bins - 1)))
+    );
+    hist[bin]++;
+  }
+
+  const lowTarget = Math.max(0, Math.floor(pixelCount * 0.01));
+  const highTarget = Math.max(0, Math.floor(pixelCount * 0.99));
+  let cumulative = 0;
+  let lowBin = 0;
+  let highBin = bins - 1;
+
+  for (let i = 0; i < bins; i++) {
+    cumulative += hist[i];
+    if (cumulative >= lowTarget) {
+      lowBin = i;
+      break;
+    }
+  }
+
+  cumulative = 0;
+  for (let i = 0; i < bins; i++) {
+    cumulative += hist[i];
+    if (cumulative >= highTarget) {
+      highBin = i;
+      break;
+    }
+  }
+
+  const low = min + (lowBin / (bins - 1)) * rawRange;
+  const high = min + (highBin / (bins - 1)) * rawRange;
+  const range = Math.max(1e-6, high - low);
+  const output = new Uint8Array(pixelCount);
+
+  for (let i = 0; i < pixelCount; i++) {
+    const value = Number.isFinite(source[i]) ? source[i] : low;
+    output[i] = Math.max(0, Math.min(255, Math.round(((value - low) / range) * 255)));
   }
 
   return output;
 }
 
+function normalizeDepth(depth: RawDepthImage): Uint8Array {
+  const source = depth.data;
+  const pixelCount = depth.width * depth.height;
+
+  if (source instanceof Uint8Array || source instanceof Uint8ClampedArray) {
+    const gray = new Uint8Array(pixelCount);
+
+    if (source.length === pixelCount) {
+      gray.set(source);
+      return stretchUint8Depth(gray);
+    }
+
+    if (source.length >= pixelCount * 4) {
+      for (let i = 0; i < pixelCount; i++) {
+        gray[i] = source[i * 4];
+      }
+      return stretchUint8Depth(gray);
+    }
+
+    gray.set(source.slice(0, pixelCount));
+    return stretchUint8Depth(gray);
+  }
+
+  return stretchFloatDepth(source, pixelCount);
+}
 self.onmessage = async (event: MessageEvent<DepthWorkerRequest>) => {
   const message = event.data;
 
