@@ -9,11 +9,37 @@ interface CompareSliderProps {
   renderKey: string;
   /** true일 때만 사진 탭이 초점 변경으로 처리됨 (슬라이더 분리와 겹치지 않음) */
   tapFocusMode: boolean;
+  subjectLocked?: boolean;
+  focusPoint?: RatioPoint | null;
   /** 이미지 표시 영역 안에서의 탭 좌표(0~1) */
   onTapFocus?: (point: { xRatio: number; yRatio: number }) => void;
 }
 
+type RatioPoint = { xRatio: number; yRatio: number };
+type ImageFrame = { left: number; top: number; width: number; height: number };
+
 const TAP_MOVE_THRESHOLD_PX = 12;
+
+function getContainedImageFrame(
+  containerWidth: number,
+  containerHeight: number,
+  imageWidth: number,
+  imageHeight: number
+): ImageFrame {
+  const imageAspect = imageWidth / imageHeight;
+  const containerAspect = containerWidth / containerHeight;
+  const width =
+    containerAspect > imageAspect ? containerHeight * imageAspect : containerWidth;
+  const height =
+    containerAspect > imageAspect ? containerHeight : containerWidth / imageAspect;
+
+  return {
+    left: (containerWidth - width) / 2,
+    top: (containerHeight - height) / 2,
+    width,
+    height,
+  };
+}
 
 /**
  * Before / After 비교 슬라이더
@@ -25,6 +51,8 @@ export default function CompareSlider({
   resultCanvas,
   renderKey,
   tapFocusMode,
+  subjectLocked = false,
+  focusPoint = null,
   onTapFocus,
 }: CompareSliderProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -32,9 +60,53 @@ export default function CompareSlider({
   const afterCanvasRef = useRef<HTMLCanvasElement>(null);
 
   const [splitX, setSplitX] = useState(0.5);
+  const [imageFrame, setImageFrame] = useState<ImageFrame | null>(null);
   const handleDraggingRef = useRef(false);
   const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
   const movedPastThresholdRef = useRef(false);
+
+  const updateImageFrame = useCallback(() => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return;
+
+    const next = getContainedImageFrame(
+      rect.width,
+      rect.height,
+      originalImage.naturalWidth,
+      originalImage.naturalHeight
+    );
+
+    setImageFrame((prev) => {
+      if (
+        prev &&
+        Math.abs(prev.left - next.left) < 0.5 &&
+        Math.abs(prev.top - next.top) < 0.5 &&
+        Math.abs(prev.width - next.width) < 0.5 &&
+        Math.abs(prev.height - next.height) < 0.5
+      ) {
+        return prev;
+      }
+      return next;
+    });
+  }, [originalImage]);
+
+  useEffect(() => {
+    updateImageFrame();
+    const el = containerRef.current;
+    if (!el) return;
+
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => updateImageFrame());
+    observer?.observe(el);
+    window.addEventListener("resize", updateImageFrame);
+
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", updateImageFrame);
+    };
+  }, [updateImageFrame]);
 
   useEffect(() => {
     const canvas = beforeCanvasRef.current;
@@ -66,16 +138,14 @@ export default function CompareSlider({
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return null;
 
-      const imageAspect = originalImage.naturalWidth / originalImage.naturalHeight;
-      const containerAspect = rect.width / rect.height;
-      const displayW =
-        containerAspect > imageAspect ? rect.height * imageAspect : rect.width;
-      const displayH =
-        containerAspect > imageAspect ? rect.height : rect.width / imageAspect;
-      const offsetX = rect.left + (rect.width - displayW) / 2;
-      const offsetY = rect.top + (rect.height - displayH) / 2;
-      const xRatio = (clientX - offsetX) / displayW;
-      const yRatio = (clientY - offsetY) / displayH;
+      const frame = getContainedImageFrame(
+        rect.width,
+        rect.height,
+        originalImage.naturalWidth,
+        originalImage.naturalHeight
+      );
+      const xRatio = (clientX - rect.left - frame.left) / frame.width;
+      const yRatio = (clientY - rect.top - frame.top) / frame.height;
 
       if (xRatio < 0 || xRatio > 1 || yRatio < 0 || yRatio > 1) {
         return null;
@@ -205,6 +275,13 @@ export default function CompareSlider({
 
   const splitPercent = `${(splitX * 100).toFixed(2)}%`;
   const showSplit = !tapFocusMode;
+  const focusMarker =
+    subjectLocked && focusPoint && imageFrame
+      ? {
+          left: imageFrame.left + imageFrame.width * focusPoint.xRatio,
+          top: imageFrame.top + imageFrame.height * focusPoint.yRatio,
+        }
+      : null;
 
   return (
     <div
@@ -287,7 +364,25 @@ export default function CompareSlider({
       {tapFocusMode && (
         <div className="absolute top-3 inset-x-0 flex justify-center pointer-events-none">
           <div className="bg-black/65 backdrop-blur-sm text-sky-200 text-xs font-medium px-3 py-1.5 rounded-full border border-sky-500/30">
-            탭하여 초점 맞추기
+            {subjectLocked ? "피사체 잠금 활성" : "탭하여 초점 맞추기"}
+          </div>
+        </div>
+      )}
+
+      {focusMarker && (
+        <div
+          className="pointer-events-none absolute z-20"
+          style={{
+            left: focusMarker.left,
+            top: focusMarker.top,
+          }}
+        >
+          <div className="relative -translate-x-1/2 -translate-y-1/2">
+            <div className="h-12 w-12 rounded-full border-2 border-sky-100 shadow-[0_0_0_9999px_rgba(14,165,233,0.03),0_0_18px_rgba(125,211,252,0.55)]" />
+            <div className="absolute left-1/2 top-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-sky-100 shadow-[0_0_10px_rgba(125,211,252,0.9)]" />
+            <div className="absolute left-1/2 top-full mt-2 -translate-x-1/2 whitespace-nowrap rounded-full border border-sky-400/35 bg-black/70 px-2.5 py-1 text-[11px] font-medium text-sky-100 backdrop-blur-sm">
+              피사체 잠금
+            </div>
           </div>
         </div>
       )}

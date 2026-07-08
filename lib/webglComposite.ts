@@ -27,7 +27,7 @@ export interface CompositeOptions {
 
 const MAX_WEBGL_INPUT_EDGE = 1024;
 /** 초점 조절 중 블러 패스 긴 변 상한 */
-const INTERACTIVE_BLUR_MAX_EDGE = 1024;
+const INTERACTIVE_BLUR_MAX_EDGE = 768;
 const BLUR_SLIDER_MAX = 30;
 
 /**

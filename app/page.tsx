@@ -18,9 +18,20 @@ import { growRegionFromPoint } from "@/lib/regionGrow";
 
 /** 탭 투 포커스 시 초점 구간 너비 (UI percent 기준 ±) */
 const FOCUS_TAP_WINDOW = 20;
+const FINAL_RENDER_DELAY_MS = 180;
+const MOBILE_FINAL_RENDER_DELAY_MS = 260;
+
+type RatioPoint = { xRatio: number; yRatio: number };
 
 function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
+}
+
+function getFinalRenderDelay(): number {
+  if (typeof window === "undefined") return FINAL_RENDER_DELAY_MS;
+  return window.matchMedia("(pointer: coarse), (max-width: 640px)").matches
+    ? MOBILE_FINAL_RENDER_DELAY_MS
+    : FINAL_RENDER_DELAY_MS;
 }
 
 function depthValueToFocusRange(depthValue: number): [number, number] {
@@ -63,6 +74,7 @@ export default function Home() {
   const [resultVersion, setResultVersion] = useState(0);
   const [hasTappedFocus, setHasTappedFocus] = useState(false);
   const [hasSubjectLock, setHasSubjectLock] = useState(false);
+  const [tapFocusPoint, setTapFocusPoint] = useState<RatioPoint | null>(null);
   const [tapFocusMode, setTapFocusMode] = useState(false);
   const isProcessingRef = useRef(false);
   // ref로 최신 focusRange를 콜백에서 stale closure 없이 참조
@@ -251,6 +263,7 @@ export default function Home() {
       setHistogramData([]);
       setHasTappedFocus(false);
       setHasSubjectLock(false);
+      setTapFocusPoint(null);
       setTapFocusMode(false);
       // 새 이미지 업로드 시 초점 범위를 기본값으로 초기화
       focusRangeRef.current = [0, 50];
@@ -331,7 +344,7 @@ export default function Home() {
   );
 
   const handleTapFocus = useCallback(
-    (point: { xRatio: number; yRatio: number }) => {
+    (point: RatioPoint) => {
       const depth = depthDataRef.current;
       if (!uploadedImage || !depth || isProcessing) return;
 
@@ -347,10 +360,12 @@ export default function Home() {
         const mask = growRegionFromPoint(uploadedImage, point.xRatio, point.yRatio);
         subjectMaskRef.current = mask;
         setHasSubjectLock(true);
+        setTapFocusPoint(point);
       } catch (e) {
         console.warn("[TapFocus] regionGrow 실패, subject mask 없이 진행:", e);
         subjectMaskRef.current = null;
         setHasSubjectLock(false);
+        setTapFocusPoint(null);
       }
 
       // 탭은 드래그가 아니라 단발성 이벤트이므로 풀 품질 렌더
@@ -377,6 +392,7 @@ export default function Home() {
   const handleSubjectLockClear = useCallback(() => {
     subjectMaskRef.current = null;
     setHasSubjectLock(false);
+    setTapFocusPoint(null);
 
     if (!uploadedImage || isProcessing || maskMode) return;
     renderResult(uploadedImage, blurRadiusRef.current, { blurInteractive: false });
@@ -398,7 +414,7 @@ export default function Home() {
           blurCommitTimerRef.current = null;
           renderResult(uploadedImage, value, { blurInteractive: false });
           setResultVersion((version) => version + 1);
-        }, 180);
+        }, getFinalRenderDelay());
       }
     },
     [uploadedImage, isProcessing, maskMode, scheduleResultInteractive, renderResult]
@@ -421,7 +437,7 @@ export default function Home() {
             blurInteractive: false,
           });
           setResultVersion((version) => version + 1);
-        }, 180);
+        }, getFinalRenderDelay());
       }
     },
     [uploadedImage, isProcessing, maskMode, scheduleResultInteractive, renderResult]
@@ -515,6 +531,8 @@ export default function Home() {
                     originalImage={uploadedImage}
                     resultCanvas={resultCanvasRef.current}
                     tapFocusMode={tapFocusMode}
+                    subjectLocked={hasSubjectLock}
+                    focusPoint={tapFocusPoint}
                     onTapFocus={handleTapFocus}
                     renderKey={`${blurRadius}-${focusFeather}-${bokehShape}-${focusRange[0]}-${focusRange[1]}-${resultVersion}`}
                   />
