@@ -22,6 +22,8 @@ interface BottomSheetProps {
   histogramData: number[];
   /** 켜면 사진 탭만 초점 변경, 비교 슬라이더는 블러 결과만 표시 */
   tapFocusMode: boolean;
+  hasSubjectLock: boolean;
+  onSubjectLockClear: () => void;
   onTapFocusModeToggle: () => void;
 }
 
@@ -169,6 +171,8 @@ export default function BottomSheet({
   onFocusRangeCommit,
   histogramData,
   tapFocusMode,
+  hasSubjectLock,
+  onSubjectLockClear,
   onTapFocusModeToggle,
 }: BottomSheetProps) {
   const [panelOpen, setPanelOpen] = useState(true);
@@ -409,6 +413,31 @@ export default function BottomSheet({
               <p className="text-zinc-500 text-xs mb-2 text-center -mt-1">
                 사진을 탭하면 그 위치에 초점이 맞습니다
               </p>
+            )}
+
+            {hasSubjectLock && (
+              <button
+                type="button"
+                onClick={onSubjectLockClear}
+                disabled={isProcessing || maskMode}
+                className="mb-3 flex min-h-[2.5rem] w-full items-center justify-center gap-2 rounded-xl border border-sky-500/35 bg-sky-500/15 px-3 py-2 text-[13px] font-medium text-sky-100 transition-all duration-150 hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={1.8}
+                  stroke="currentColor"
+                  className="h-4 w-4 shrink-0"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M6 18 18 6M6 6l12 12"
+                  />
+                </svg>
+                피사체 잠금 해제
+              </button>
             )}
 
             {/* 초점 범위 (Focus Range) — 건드리지 않음 */}

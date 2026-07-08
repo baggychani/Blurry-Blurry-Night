@@ -62,6 +62,7 @@ export default function Home() {
   const [histogramData, setHistogramData] = useState<number[]>([]);
   const [resultVersion, setResultVersion] = useState(0);
   const [hasTappedFocus, setHasTappedFocus] = useState(false);
+  const [hasSubjectLock, setHasSubjectLock] = useState(false);
   const [tapFocusMode, setTapFocusMode] = useState(false);
   const isProcessingRef = useRef(false);
   // ref로 최신 focusRange를 콜백에서 stale closure 없이 참조
@@ -249,6 +250,7 @@ export default function Home() {
       setMaskMode(false);
       setHistogramData([]);
       setHasTappedFocus(false);
+      setHasSubjectLock(false);
       setTapFocusMode(false);
       // 새 이미지 업로드 시 초점 범위를 기본값으로 초기화
       focusRangeRef.current = [0, 50];
@@ -344,9 +346,11 @@ export default function Home() {
       try {
         const mask = growRegionFromPoint(uploadedImage, point.xRatio, point.yRatio);
         subjectMaskRef.current = mask;
+        setHasSubjectLock(true);
       } catch (e) {
         console.warn("[TapFocus] regionGrow 실패, subject mask 없이 진행:", e);
         subjectMaskRef.current = null;
+        setHasSubjectLock(false);
       }
 
       // 탭은 드래그가 아니라 단발성 이벤트이므로 풀 품질 렌더
@@ -370,6 +374,14 @@ export default function Home() {
   );
 
   // ── 블러 슬라이더 ─────────────────────────────────────────────────────────
+  const handleSubjectLockClear = useCallback(() => {
+    subjectMaskRef.current = null;
+    setHasSubjectLock(false);
+
+    if (!uploadedImage || isProcessing || maskMode) return;
+    renderResult(uploadedImage, blurRadiusRef.current, { blurInteractive: false });
+    setResultVersion((version) => version + 1);
+  }, [uploadedImage, isProcessing, maskMode, renderResult]);
   const handleBlurChange = useCallback(
     (value: number) => {
       blurRadiusRef.current = value;
@@ -545,6 +557,8 @@ export default function Home() {
             onFocusRangeCommit={handleFocusRangeCommit}
             histogramData={histogramData}
             tapFocusMode={tapFocusMode}
+            hasSubjectLock={hasSubjectLock}
+            onSubjectLockClear={handleSubjectLockClear}
             onTapFocusModeToggle={() => setTapFocusMode((v) => !v)}
           />
         )}
