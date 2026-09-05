@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface FocusRangeSliderProps {
   value: [number, number];
@@ -38,8 +38,8 @@ function turboColor(t: number): [number, number, number] {
 /** 모바일 권장 최소 터치 폭 (약 44px) */
 const EDGE_HIT = 44;
 
-/** 히스토그램 트랙 높이 — 낮은 직사각형 */
-const TRACK_H = 36;
+/** 히스토그램 트랙 높이 */
+const TRACK_H = 52;
 
 /** 막대 최대 높이 비율 (트랙 대비, 낮출수록 더 낮은 히스토그램) */
 const BAR_MAX_FRAC = 0.68;
@@ -64,6 +64,7 @@ export default function FocusRangeSlider({
   } | null>(null);
 
   const halfHit = EDGE_HIT / 2;
+  const [isInteracting, setIsInteracting] = useState(false);
 
   useEffect(() => {
     pendingRef.current = value;
@@ -153,6 +154,7 @@ export default function FocusRangeSlider({
       e.currentTarget.releasePointerCapture(e.pointerId);
     }
     dragRef.current = null;
+    setIsInteracting(false);
     if (hadDrag && onCommit) {
       onCommit(pendingRef.current);
     }
@@ -169,6 +171,7 @@ export default function FocusRangeSlider({
         startPct: getPercent(e.clientX),
         startRange: [value[0], value[1]],
       };
+      setIsInteracting(true);
       e.currentTarget.setPointerCapture(e.pointerId);
     },
     onPointerMove(e: React.PointerEvent<HTMLDivElement>) {
@@ -238,7 +241,7 @@ export default function FocusRangeSlider({
           role="slider"
           aria-label="초점 범위 왼쪽"
         >
-          <div className="w-0.5 h-6 rounded-full bg-white/95 shadow pointer-events-none" />
+          <div className="w-0.5 h-8 rounded-full bg-white/95 shadow pointer-events-none" />
         </div>
 
         <div
@@ -257,13 +260,17 @@ export default function FocusRangeSlider({
           role="slider"
           aria-label="초점 범위 오른쪽"
         >
-          <div className="w-0.5 h-6 rounded-full bg-white/95 shadow pointer-events-none" />
+          <div className="w-0.5 h-8 rounded-full bg-white/95 shadow pointer-events-none" />
         </div>
       </div>
 
-      <div className="flex justify-between mt-1.5">
+      <div className="flex justify-between items-center mt-1.5">
         <span className="text-zinc-500 text-xs">← 가까이</span>
-        <span className="text-zinc-400 text-xs font-mono tabular-nums">
+        <span
+          className={`text-zinc-400 text-xs tabular-nums transition-opacity duration-200 ${
+            isInteracting ? "opacity-100" : "opacity-0"
+          }`}
+        >
           {min}% - {max}%
         </span>
         <span className="text-zinc-500 text-xs">멀리 →</span>

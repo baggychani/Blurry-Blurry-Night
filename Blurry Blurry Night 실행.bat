@@ -35,8 +35,8 @@ if not errorlevel 1 (
     goto DONE
 )
 
-echo Starting dev server in background...
-start /min "BBN dev server" /D "%CD%" cmd /c "npm run dev"
+echo Starting dev server...
+start "BBN dev server" /D "%CD%" cmd /k "npm run dev"
 
 echo Waiting for port 3000 (up to ~30 sec)...
 set /a BBN_COUNT=0
@@ -56,8 +56,8 @@ start "" "http://localhost:3000"
 popd
 echo.
 echo  URL: http://localhost:3000
-echo  Closing this window does not always stop the server.
-echo  To stop: Task Manager - end node.exe
+echo  Dev server logs are in the "BBN dev server" window.
+echo  To stop: close that window (or Ctrl+C inside it).
 echo.
 pause
 endlocal

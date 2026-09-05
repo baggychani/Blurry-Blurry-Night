@@ -55,12 +55,14 @@ export default function Header({ status, progress }: HeaderProps) {
     status === "loading_model" ? `AI 모델 다운로드 중... (${loadingProgress}%)` : text;
 
   return (
-    <header className="flex items-center justify-between px-5 py-4 flex-shrink-0">
+    <header className="flex items-center justify-between px-5 py-4 lg:px-8 lg:py-5 flex-shrink-0 lg:border-b lg:border-white/[0.06]">
       {/* 로고 */}
-      <div className="flex items-center gap-2 min-w-0">
-        <NightSkyLogo />
+      <div className="flex items-center gap-2 lg:gap-3 min-w-0">
+        <div className="lg:scale-[1.3] lg:origin-left">
+          <NightSkyLogo />
+        </div>
         <div className="flex flex-col leading-none min-w-0">
-          <span className="text-white font-semibold text-sm sm:text-lg tracking-tight truncate">
+          <span className="text-white font-semibold text-sm sm:text-lg lg:text-2xl tracking-tight truncate">
             Blurry{" "}
             <span
               className="font-light"
@@ -74,14 +76,14 @@ export default function Header({ status, progress }: HeaderProps) {
             </span>{" "}
             <span className="text-zinc-400 font-light">Night</span>
           </span>
-          <span className="mt-1 text-[9px] sm:text-[10px] uppercase tracking-[0.22em] text-zinc-600">
+          <span className="mt-1 lg:mt-1.5 text-[9px] sm:text-[10px] lg:text-[11px] uppercase tracking-[0.22em] text-zinc-600">
             by Baggychani
           </span>
         </div>
       </div>
 
       {/* 모델 상태 표시 */}
-      <div className="flex flex-col items-end gap-1">
+      <div className="flex flex-col items-end gap-1 lg:flex-row lg:items-center lg:gap-2.5 lg:rounded-full lg:border lg:border-white/10 lg:bg-white/[0.04] lg:px-4 lg:py-2">
         <div className="flex items-center gap-1.5">
           {(status === "loading_model" || status === "estimating") && (
             <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-pulse" />

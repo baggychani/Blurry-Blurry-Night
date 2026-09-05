@@ -107,7 +107,6 @@ components/
   FocusRangeSlider.tsx
 hooks/
   useDepth.ts
-  useSegmenter.ts   # 레거시(MediaPipe), 현재 파이프라인 미사용
 lib/
   depthWorker.ts
   depthWorkerInit.ts

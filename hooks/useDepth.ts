@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { getDeviceTier } from "@/lib/deviceTier";
 
 export type DepthStatus = "idle" | "loading_model" | "ready" | "estimating" | "error";
 
@@ -135,7 +136,7 @@ export function useDepth() {
       setStatus("error");
     };
 
-    worker.postMessage({ type: "load" });
+    worker.postMessage({ type: "load", tier: getDeviceTier() });
 
     const pendingRequests = pendingRef.current;
 

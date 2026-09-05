@@ -15,6 +15,7 @@ import {
   type SubjectMask,
 } from "@/lib/webglComposite";
 import { growRegionFromPoint } from "@/lib/regionGrow";
+import { isMobileLikeDevice } from "@/lib/deviceTier";
 
 /** 탭 투 포커스 시 초점 구간 너비 (UI percent 기준 ±) */
 const FOCUS_TAP_WINDOW = 20;
@@ -27,11 +28,13 @@ function clampPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
 }
 
+function stripExtension(fileName: string): string {
+  const dotIndex = fileName.lastIndexOf(".");
+  return dotIndex > 0 ? fileName.slice(0, dotIndex) : fileName;
+}
+
 function getFinalRenderDelay(): number {
-  if (typeof window === "undefined") return FINAL_RENDER_DELAY_MS;
-  return window.matchMedia("(pointer: coarse), (max-width: 640px)").matches
-    ? MOBILE_FINAL_RENDER_DELAY_MS
-    : FINAL_RENDER_DELAY_MS;
+  return isMobileLikeDevice() ? MOBILE_FINAL_RENDER_DELAY_MS : FINAL_RENDER_DELAY_MS;
 }
 
 function depthValueToFocusRange(depthValue: number): [number, number] {
@@ -85,6 +88,8 @@ export default function Home() {
     width: number;
     height: number;
   } | null>(null);
+  // 다운로드 파일명(blurry_원본명)에 쓸 원본 파일명(확장자 제외)
+  const originalFileNameRef = useRef<string>("image");
 
   // 블러 결과 캔버스 (CompareSlider의 "After"쪽 & 다운로드용)
   const resultCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -254,7 +259,8 @@ export default function Home() {
 
   // ── 이미지 업로드 ─────────────────────────────────────────────────────────
   const handleImageLoad = useCallback(
-    async (img: HTMLImageElement, _file: File) => {
+    async (img: HTMLImageElement, file: File) => {
+      originalFileNameRef.current = stripExtension(file.name) || "image";
       depthDataRef.current = null;
       resultCanvasRef.current = null;
       subjectMaskRef.current = null;
@@ -474,7 +480,12 @@ export default function Home() {
     if (depthDataRef.current) {
       renderResult(uploadedImage, blurRadius, { blurInteractive: false });
     }
-    downloadCanvas(resultCanvasRef.current, `bbn-${Date.now()}`, "jpeg", 0.98);
+    downloadCanvas(
+      resultCanvasRef.current,
+      `blurry_${originalFileNameRef.current}`,
+      "jpeg",
+      0.98
+    );
   }, [uploadedImage, blurRadius, renderResult]);
 
   return (
@@ -492,95 +503,100 @@ export default function Home() {
 
       <Header status={depthStatus} progress={depthProgress} />
 
-      {/* 프리뷰 영역 */}
-      <div className="flex-1 relative mx-1 sm:mx-2 mt-1 mb-0 overflow-hidden rounded-t-xl bg-zinc-950 min-h-0">
-        {uploadedImage ? (
-          <>
-            {/* AI 처리 중 오버레이 */}
-            {isProcessing && (
-              <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm rounded-2xl">
-                <div className="w-10 h-10 border-2 border-white/20 border-t-white rounded-full animate-spin mb-3" />
-                <p className="text-white text-sm font-medium">AI 분석 중...</p>
-                <p className="text-zinc-400 text-xs mt-1">거리 정보를 계산하고 있어요</p>
-              </div>
-            )}
-
-            {/* 마스크 모드 */}
-            {maskMode ? (
-              <>
-                {/* CompareSlider와 동일: 부모를 꽉 채운 뒤 캔버스만 비율 유지 축소 */}
-                <div className="absolute inset-0 overflow-hidden rounded-2xl">
-                  <canvas
-                    ref={maskCanvasRef}
-                    className="absolute inset-0 m-auto max-w-full max-h-full block"
-                  />
+      {/* lg 이상(데스크톱): 사진과 패널을 좌우로, 그 아래 폭에서는 기존처럼 위아래로 */}
+      <div className="flex flex-1 flex-col lg:flex-row lg:gap-3 lg:p-3 min-h-0">
+        {/* 프리뷰 영역 */}
+        <div className="flex-1 relative mx-1 sm:mx-2 mt-1 mb-0 lg:m-0 overflow-hidden rounded-t-xl lg:rounded-xl bg-zinc-950 min-h-0">
+          {uploadedImage ? (
+            <>
+              {/* AI 처리 중 오버레이 */}
+              {isProcessing && (
+                <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm rounded-2xl">
+                  <div className="w-10 h-10 border-2 border-white/20 border-t-white rounded-full animate-spin mb-3" />
+                  <p className="text-white text-sm font-medium">AI 분석 중...</p>
+                  <p className="text-zinc-400 text-xs mt-1">
+                    거리 정보를 계산하고 있어요
+                  </p>
                 </div>
-                {!isProcessing && !depthDataRef.current && (
-                  <div className="absolute top-3 inset-x-0 flex justify-center z-10 pointer-events-none">
-                    <div className="bg-black/60 backdrop-blur-sm border border-red-500/40 text-red-300 text-xs font-medium px-3 py-1.5 rounded-lg">
-                      거리 맵 추정 실패 — 원본 이미지를 표시합니다
-                    </div>
+              )}
+
+              {/* 마스크 모드 */}
+              {maskMode ? (
+                <>
+                  {/* CompareSlider와 동일: 부모를 꽉 채운 뒤 캔버스만 비율 유지 축소 */}
+                  <div className="absolute inset-0 overflow-hidden rounded-2xl">
+                    <canvas
+                      ref={maskCanvasRef}
+                      className="absolute inset-0 m-auto max-w-full max-h-full block"
+                    />
                   </div>
-                )}
-              </>
-            ) : (
-              /* Before/After 비교 슬라이더 — 항상 표시 */
-              resultCanvasRef.current && (
-                <div className="absolute inset-0">
-                  <CompareSlider
-                    originalImage={uploadedImage}
-                    resultCanvas={resultCanvasRef.current}
-                    tapFocusMode={tapFocusMode}
-                    subjectLocked={hasSubjectLock}
-                    focusPoint={tapFocusPoint}
-                    onTapFocus={handleTapFocus}
-                    renderKey={`${blurRadius}-${focusFeather}-${bokehShape}-${focusRange[0]}-${focusRange[1]}-${resultVersion}`}
-                  />
-                  {!tapFocusMode && !hasTappedFocus && !isProcessing && (
-                    <div className="absolute bottom-4 inset-x-0 flex justify-center pointer-events-none z-10">
-                      <div className="flex items-center gap-2 bg-black/70 backdrop-blur-sm border border-white/15 text-white text-xs font-medium px-3.5 py-2 rounded-full shadow-lg">
-                        <span className="text-center px-1">
-                          아래 「탭으로 초점 맞추기」를 켠 뒤 사진을 탭하세요
-                        </span>
+                  {!isProcessing && !depthDataRef.current && (
+                    <div className="absolute top-3 inset-x-0 flex justify-center z-10 pointer-events-none">
+                      <div className="bg-black/60 backdrop-blur-sm border border-red-500/40 text-red-300 text-xs font-medium px-3 py-1.5 rounded-lg">
+                        거리 맵 추정 실패 — 원본 이미지를 표시합니다
                       </div>
                     </div>
                   )}
-                </div>
-              )
-            )}
-          </>
-        ) : (
-          <div className="absolute inset-0 p-4">
-            <UploadZone onImageLoad={handleImageLoad} />
-          </div>
-        )}
-      </div>
+                </>
+              ) : (
+                /* Before/After 비교 슬라이더 — 항상 표시 */
+                resultCanvasRef.current && (
+                  <div className="absolute inset-0">
+                    <CompareSlider
+                      originalImage={uploadedImage}
+                      resultCanvas={resultCanvasRef.current}
+                      tapFocusMode={tapFocusMode}
+                      subjectLocked={hasSubjectLock}
+                      focusPoint={tapFocusPoint}
+                      onTapFocus={handleTapFocus}
+                      renderKey={`${blurRadius}-${focusFeather}-${bokehShape}-${focusRange[0]}-${focusRange[1]}-${resultVersion}`}
+                    />
+                    {!tapFocusMode && !hasTappedFocus && !isProcessing && (
+                      <div className="absolute bottom-4 inset-x-0 flex justify-center pointer-events-none z-10">
+                        <div className="flex items-center gap-2 bg-black/70 backdrop-blur-sm border border-white/15 text-white text-xs font-medium px-3.5 py-2 rounded-full shadow-lg">
+                          <span className="text-center px-1">
+                            아래 「탭으로 초점 맞추기」를 켠 뒤 사진을 탭하세요
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              )}
+            </>
+          ) : (
+            <div className="absolute inset-0 p-4">
+              <UploadZone onImageLoad={handleImageLoad} />
+            </div>
+          )}
+        </div>
 
-      <AnimatePresence>
-        {uploadedImage && (
-          <BottomSheet
-            blurRadius={blurRadius}
-            onBlurChange={handleBlurChange}
-            focusFeather={focusFeather}
-            onFocusFeatherChange={handleFocusFeatherChange}
-            onNewImage={handleNewImageClick}
-            onDownload={handleDownload}
-            isProcessing={isProcessing}
-            maskMode={maskMode}
-            onMaskModeToggle={handleMaskModeToggle}
-            bokehShape={bokehShape}
-            onBokehShapeChange={setBokehShape}
-            focusRange={focusRange}
-            onFocusRangeChange={handleFocusRangeChange}
-            onFocusRangeCommit={handleFocusRangeCommit}
-            histogramData={histogramData}
-            tapFocusMode={tapFocusMode}
-            hasSubjectLock={hasSubjectLock}
-            onSubjectLockClear={handleSubjectLockClear}
-            onTapFocusModeToggle={() => setTapFocusMode((v) => !v)}
-          />
-        )}
-      </AnimatePresence>
+        <AnimatePresence>
+          {uploadedImage && (
+            <BottomSheet
+              blurRadius={blurRadius}
+              onBlurChange={handleBlurChange}
+              focusFeather={focusFeather}
+              onFocusFeatherChange={handleFocusFeatherChange}
+              onNewImage={handleNewImageClick}
+              onDownload={handleDownload}
+              isProcessing={isProcessing}
+              maskMode={maskMode}
+              onMaskModeToggle={handleMaskModeToggle}
+              bokehShape={bokehShape}
+              onBokehShapeChange={setBokehShape}
+              focusRange={focusRange}
+              onFocusRangeChange={handleFocusRangeChange}
+              onFocusRangeCommit={handleFocusRangeCommit}
+              histogramData={histogramData}
+              tapFocusMode={tapFocusMode}
+              hasSubjectLock={hasSubjectLock}
+              onSubjectLockClear={handleSubjectLockClear}
+              onTapFocusModeToggle={() => setTapFocusMode((v) => !v)}
+            />
+          )}
+        </AnimatePresence>
+      </div>
     </main>
   );
 }

@@ -286,7 +286,7 @@ export default function CompareSlider({
   return (
     <div
       ref={containerRef}
-      className={`relative w-full h-full overflow-hidden rounded-2xl select-none ${
+      className={`group relative w-full h-full overflow-hidden rounded-2xl select-none ${
         tapFocusMode
           ? "cursor-crosshair touch-manipulation"
           : "cursor-col-resize touch-manipulation"
@@ -352,7 +352,7 @@ export default function CompareSlider({
           </div>
 
           <div className="absolute top-3 inset-x-0 flex justify-center pointer-events-none">
-            <div className="grid grid-cols-[6rem_auto_6rem] items-center bg-black/65 backdrop-blur-sm text-white text-xs font-medium px-3 py-1.5 rounded-full border border-white/10">
+            <div className="grid grid-cols-[6rem_auto_6rem] items-center bg-black/65 backdrop-blur-sm text-white text-xs font-medium px-3 py-1.5 rounded-full border border-white/10 lg:opacity-30 lg:transition-opacity lg:duration-300 lg:group-hover:opacity-100">
               <span className="text-zinc-300 text-right pr-2">← 원본</span>
               <span className="text-zinc-600 text-center">|</span>
               <span className="text-blue-200 text-left pl-2">블러 결과 →</span>

@@ -31,7 +31,6 @@ const INTERACTIVE_BLUR_MAX_EDGE = 768;
 const BLUR_SLIDER_MAX = 30;
 const FINAL_LENS_BLUR_SAMPLES = 96;
 const INTERACTIVE_LENS_BLUR_SAMPLES = 40;
-const MAX_LENS_BLUR_CACHE_ENTRIES = 24;
 
 /**
  * JBU 캐시: depthData 레퍼런스 + maskRef가 둘 다 일치할 때만 재사용.
@@ -48,8 +47,16 @@ const downscaledImageCache = new WeakMap<
   Map<number, { canvas: HTMLCanvasElement; scale: number }>
 >();
 const lensBlurCache = new WeakMap<Uint8Array, Map<string, HTMLCanvasElement>>();
+const alphaMaskCache = new WeakMap<HTMLCanvasElement, Map<string, HTMLCanvasElement>>();
 const canvasCacheIds = new WeakMap<HTMLCanvasElement, number>();
 let nextCanvasCacheId = 1;
+const MAX_GPU_RESULT_CACHE_ENTRIES = 24;
+
+function evictOldestIfNeeded<K, V>(map: Map<K, V>, maxEntries: number): void {
+  if (map.size <= maxEntries) return;
+  const oldestKey = map.keys().next().value;
+  if (oldestKey !== undefined) map.delete(oldestKey);
+}
 
 function getCanvasCacheId(canvas: HTMLCanvasElement | null): number {
   if (!canvas) return 0;
@@ -146,7 +153,8 @@ function makeCanvas(w: number, h: number): HTMLCanvasElement {
 
 /**
  * WebGL 캔버스 내용을 2D 캔버스로 복사한다.
- * `loseContext()` 호출 후에는 WebGL 프레임버퍼가 무효화되므로, 반드시 그 전에 호출해야 한다.
+ * 패스의 gl 컨텍스트는 다음 호출에서 재사용되며 다시 그려지므로, 합성·캐시에는
+ * 반드시 이 스냅샷(복사본)만 사용해야 한다.
  */
 function snapshotWebGLCanvasTo2D(glCanvas: HTMLCanvasElement): HTMLCanvasElement {
   const snap = makeCanvas(glCanvas.width, glCanvas.height);
@@ -270,6 +278,116 @@ function createProgram(
   return program;
 }
 
+const QUAD_VERTEX_SOURCE = `
+  attribute vec2 a_position;
+  attribute vec2 a_texCoord;
+  varying vec2 v_texCoord;
+  void main() {
+    gl_Position = vec4(a_position, 0.0, 1.0);
+    v_texCoord = a_texCoord;
+  }
+`;
+
+const QUAD_VERTICES = new Float32Array([
+  -1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, -1, 1, 0, 1, 1, -1, 1, 0, 1, 1, 1, 1,
+]);
+
+/**
+ * 셰이더 컴파일·WebGL 컨텍스트 생성은 프레임마다 반복하기엔 비용이 크다
+ * (특히 모바일 GPU 드라이버). 패스 종류(key)별로 컨텍스트·프로그램·정점버퍼·
+ * 텍스처 객체를 한 번만 만들어 재사용하고, 매 호출은 캔버스 크기·텍스처
+ * 내용·uniform만 갱신한다. 드래그 중 반복 호출되는 렌즈블러/알파마스크/JBU가
+ * 모두 이 레지스트리를 통해 컨텍스트를 공유한다.
+ */
+type WebGLPass = {
+  gl: WebGLRenderingContext;
+  canvas: HTMLCanvasElement;
+  program: WebGLProgram;
+  buffer: WebGLBuffer;
+  positionLoc: number;
+  texCoordLoc: number;
+  textures: Map<string, WebGLTexture>;
+};
+
+const passRegistry = new Map<string, WebGLPass>();
+
+function getPass(
+  key: string,
+  fragmentSource: string,
+  contextAttribs: WebGLContextAttributes
+): WebGLPass | null {
+  const cached = passRegistry.get(key);
+  if (cached) return cached;
+
+  const canvas = makeCanvas(1, 1);
+  const gl = canvas.getContext("webgl", contextAttribs);
+  if (!gl) return null;
+
+  let program: WebGLProgram;
+  try {
+    program = createProgram(gl, QUAD_VERTEX_SOURCE, fragmentSource);
+  } catch (e) {
+    console.warn(`[WebGL] "${key}" 프로그램 컴파일 실패`, e);
+    return null;
+  }
+
+  const buffer = gl.createBuffer();
+  if (!buffer) return null;
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, QUAD_VERTICES, gl.STATIC_DRAW);
+
+  const positionLoc = gl.getAttribLocation(program, "a_position");
+  const texCoordLoc = gl.getAttribLocation(program, "a_texCoord");
+
+  const pass: WebGLPass = {
+    gl,
+    canvas,
+    program,
+    buffer,
+    positionLoc,
+    texCoordLoc,
+    textures: new Map(),
+  };
+  passRegistry.set(key, pass);
+  return pass;
+}
+
+function getPassTexture(pass: WebGLPass, name: string): WebGLTexture {
+  let tex = pass.textures.get(name);
+  if (!tex) {
+    const created = pass.gl.createTexture();
+    if (!created) throw new Error("WebGL texture creation failed");
+    tex = created;
+    pass.textures.set(name, tex);
+  }
+  return tex;
+}
+
+function bindQuadGeometry(pass: WebGLPass): void {
+  const { gl, buffer, positionLoc, texCoordLoc } = pass;
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  const stride = 4 * Float32Array.BYTES_PER_ELEMENT;
+  gl.enableVertexAttribArray(positionLoc);
+  gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, stride, 0);
+  gl.enableVertexAttribArray(texCoordLoc);
+  gl.vertexAttribPointer(
+    texCoordLoc,
+    2,
+    gl.FLOAT,
+    false,
+    stride,
+    2 * Float32Array.BYTES_PER_ELEMENT
+  );
+}
+
+function setupClampedLinearTexture(gl: WebGLRenderingContext): void {
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+}
+
 function createDownscaledCanvas(
   image: HTMLImageElement,
   maxInputEdge: number = MAX_WEBGL_INPUT_EDGE
@@ -326,7 +444,41 @@ function createDepthTextureCanvas(
   return canvas;
 }
 
-/** 거리 맵 컬러 오버레이: GPU 풀스크린(슬라이더 실시간 60fps) */
+const DEPTH_OVERLAY_FRAGMENT_SOURCE = `
+  precision highp float;
+  uniform sampler2D u_image;
+  uniform sampler2D u_depthMap;
+  uniform vec2 u_focusRange;
+  varying vec2 v_texCoord;
+
+  vec3 turboMap(float x) {
+    x = clamp(x, 0.0, 1.0);
+    vec3 c0 = vec3(0.188235, 0.070588, 0.231373);
+    vec3 c1 = vec3(0.196078, 0.392157, 0.745098);
+    vec3 c2 = vec3(0.156863, 0.784314, 0.862745);
+    vec3 c3 = vec3(0.392157, 0.862745, 0.313725);
+    vec3 c4 = vec3(0.960784, 0.705882, 0.156863);
+    vec3 c5 = vec3(0.901961, 0.215686, 0.137255);
+    float u = x * 5.0;
+    if (u < 1.0) return mix(c0, c1, u);
+    if (u < 2.0) return mix(c1, c2, u - 1.0);
+    if (u < 3.0) return mix(c2, c3, u - 2.0);
+    if (u < 4.0) return mix(c3, c4, u - 3.0);
+    return mix(c4, c5, u - 4.0);
+  }
+
+  void main() {
+    float depth = texture2D(u_depthMap, v_texCoord).r;
+    vec3 turbo = turboMap(depth);
+    vec3 base = texture2D(u_image, v_texCoord).rgb;
+    bool inFocus = depth >= u_focusRange.x && depth <= u_focusRange.y;
+    float overlayAlpha = inFocus ? 0.784314 : 0.215686;
+    vec3 outRgb = mix(base, turbo, overlayAlpha);
+    gl_FragColor = vec4(outRgb, 1.0);
+  }
+`;
+
+/** 거리 맵 컬러 오버레이: GPU 풀스크린(슬라이더 실시간 60fps), 컨텍스트·프로그램은 재사용 */
 function renderDepthMapOverlayWebGL(
   outCanvas: HTMLCanvasElement,
   image: HTMLImageElement,
@@ -337,8 +489,8 @@ function renderDepthMapOverlayWebGL(
 ): void {
   const W = image.naturalWidth;
   const H = image.naturalHeight;
-  const glCanvas = makeCanvas(W, H);
-  const gl = glCanvas.getContext("webgl", {
+
+  const pass = getPass("depthOverlay", DEPTH_OVERLAY_FRAGMENT_SOURCE, {
     alpha: false,
     antialias: false,
     depth: false,
@@ -346,101 +498,28 @@ function renderDepthMapOverlayWebGL(
     preserveDrawingBuffer: true,
   });
 
-  if (!gl) {
+  if (!pass) {
     throw new Error("WebGL is not available");
   }
 
-  const vertexSource = `
-    attribute vec2 a_position;
-    attribute vec2 a_texCoord;
-    varying vec2 v_texCoord;
-    void main() {
-      gl_Position = vec4(a_position, 0.0, 1.0);
-      v_texCoord = a_texCoord;
-    }
-  `;
-
-  const fragmentSource = `
-    precision highp float;
-    uniform sampler2D u_image;
-    uniform sampler2D u_depthMap;
-    uniform vec2 u_focusRange;
-    varying vec2 v_texCoord;
-
-    vec3 turboMap(float x) {
-      x = clamp(x, 0.0, 1.0);
-      vec3 c0 = vec3(0.188235, 0.070588, 0.231373);
-      vec3 c1 = vec3(0.196078, 0.392157, 0.745098);
-      vec3 c2 = vec3(0.156863, 0.784314, 0.862745);
-      vec3 c3 = vec3(0.392157, 0.862745, 0.313725);
-      vec3 c4 = vec3(0.960784, 0.705882, 0.156863);
-      vec3 c5 = vec3(0.901961, 0.215686, 0.137255);
-      float u = x * 5.0;
-      if (u < 1.0) return mix(c0, c1, u);
-      if (u < 2.0) return mix(c1, c2, u - 1.0);
-      if (u < 3.0) return mix(c2, c3, u - 2.0);
-      if (u < 4.0) return mix(c3, c4, u - 3.0);
-      return mix(c4, c5, u - 4.0);
-    }
-
-    void main() {
-      float depth = texture2D(u_depthMap, v_texCoord).r;
-      vec3 turbo = turboMap(depth);
-      vec3 base = texture2D(u_image, v_texCoord).rgb;
-      bool inFocus = depth >= u_focusRange.x && depth <= u_focusRange.y;
-      float overlayAlpha = inFocus ? 0.784314 : 0.215686;
-      vec3 outRgb = mix(base, turbo, overlayAlpha);
-      gl_FragColor = vec4(outRgb, 1.0);
-    }
-  `;
-
-  const program = createProgram(gl, vertexSource, fragmentSource);
+  const { gl, canvas: glCanvas, program } = pass;
+  glCanvas.width = W;
+  glCanvas.height = H;
   gl.useProgram(program);
   gl.viewport(0, 0, W, H);
+  bindQuadGeometry(pass);
 
-  const vertices = new Float32Array([
-    -1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, -1, 1, 0, 1, 1, -1, 1, 0, 1, 1, 1, 1,
-  ]);
-
-  const buffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
-
-  const stride = 4 * Float32Array.BYTES_PER_ELEMENT;
-  const positionLocation = gl.getAttribLocation(program, "a_position");
-  const texCoordLocation = gl.getAttribLocation(program, "a_texCoord");
-
-  gl.enableVertexAttribArray(positionLocation);
-  gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, stride, 0);
-  gl.enableVertexAttribArray(texCoordLocation);
-  gl.vertexAttribPointer(
-    texCoordLocation,
-    2,
-    gl.FLOAT,
-    false,
-    stride,
-    2 * Float32Array.BYTES_PER_ELEMENT
-  );
-
-  const imageTex = gl.createTexture();
+  const imageTex = getPassTexture(pass, "image");
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, imageTex);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  setupClampedLinearTexture(gl);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
 
   const depthCanvas = createDepthTextureCanvas(depthData, depthWidth, depthHeight);
-  const depthTex = gl.createTexture();
+  const depthTex = getPassTexture(pass, "depth");
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, depthTex);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  setupClampedLinearTexture(gl);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, depthCanvas);
 
   const imageLoc = gl.getUniformLocation(program, "u_image");
@@ -457,14 +536,7 @@ function renderDepthMapOverlayWebGL(
   outCanvas.width = W;
   outCanvas.height = H;
   const outCtx = outCanvas.getContext("2d")!;
-  // loseContext 전에 픽셀을 복사해야 함 (그렇지 않으면 버퍼가 비어 보임)
   outCtx.drawImage(glCanvas, 0, 0);
-
-  if (imageTex) gl.deleteTexture(imageTex);
-  if (depthTex) gl.deleteTexture(depthTex);
-  if (buffer) gl.deleteBuffer(buffer);
-  gl.deleteProgram(program);
-  gl.getExtension("WEBGL_lose_context")?.loseContext();
 }
 
 function drawMaskOverlayCpu(
@@ -534,6 +606,59 @@ function drawMaskOverlayCpu(
  * @param maskCanvas      SubjectMask softData 기반 그레이스케일 캔버스 (없으면 마스크 가중치 = 1)
  * @returns               guideCanvas 해상도와 동일한 엣지 보존 깊이 캔버스
  */
+// 5×5 Mask-Guided Joint Bilateral:
+//   공간 가우시안(σ=1.6) × 컬러 가우시안(σ²≈0.04) × 마스크 경계 가우시안(σ²≈0.005)
+// maskW: 마스크 값 차이가 0.07(≈18/255) 이상이면 가중치가 급격히 감소 →
+//   전경 픽셀이 배경 depth 값을 흡수하지 못함 = 경계 누출(halo) 방지
+const JBU_FRAGMENT_SOURCE = `
+  precision highp float;
+
+  uniform sampler2D u_depth;
+  uniform sampler2D u_guide;
+  uniform sampler2D u_mask;
+  uniform vec2 u_depthSize;
+
+  varying vec2 v_texCoord;
+
+  void main() {
+    vec3  guideCenter = texture2D(u_guide, v_texCoord).rgb;
+    float maskCenter  = texture2D(u_mask,  v_texCoord).r;
+
+    float sumDepth  = 0.0;
+    float sumWeight = 0.0;
+
+    for (int dy = -2; dy <= 2; dy++) {
+      for (int dx = -2; dx <= 2; dx++) {
+        vec2 offset  = vec2(float(dx), float(dy)) / u_depthSize;
+        vec2 sampleUV = clamp(v_texCoord + offset, vec2(0.0), vec2(1.0));
+
+        float d = texture2D(u_depth, sampleUV).r;
+        vec3  g = texture2D(u_guide, sampleUV).rgb;
+        float m = texture2D(u_mask,  sampleUV).r;
+
+        // 공간 가우시안 (σ=1.6 → 2σ²≈5.12)
+        float spatialW = exp(-float(dx*dx + dy*dy) / 5.12);
+
+        // 컬러 가우시안 (σ²≈0.04)
+        vec3  cd = guideCenter - g;
+        float colorW = exp(-dot(cd, cd) / 0.04);
+
+        // 마스크 경계 가우시안 (σ²≈0.005)
+        // 마스크 값 차이가 클수록 cross-boundary 샘플 가중치 급감 → layered 분리 효과
+        float maskDiff = abs(maskCenter - m);
+        float maskW = exp(-maskDiff * maskDiff / 0.005);
+
+        float w = spatialW * colorW * maskW;
+        sumDepth  += d * w;
+        sumWeight += w;
+      }
+    }
+
+    float outDepth = sumDepth / max(sumWeight, 1e-5);
+    gl_FragColor = vec4(outDepth, outDepth, outDepth, 1.0);
+  }
+`;
+
 function upsampleDepthJBU(
   rawDepthCanvas: HTMLCanvasElement,
   guideCanvas: HTMLCanvasElement,
@@ -542,8 +667,7 @@ function upsampleDepthJBU(
   const W = guideCanvas.width;
   const H = guideCanvas.height;
 
-  const glCanvas = makeCanvas(W, H);
-  const gl = glCanvas.getContext("webgl", {
+  const pass = getPass("jbu", JBU_FRAGMENT_SOURCE, {
     alpha: false,
     antialias: false,
     depth: false,
@@ -551,7 +675,7 @@ function upsampleDepthJBU(
     preserveDrawingBuffer: true,
   });
 
-  if (!gl) {
+  if (!pass) {
     // WebGL 없으면 단순 쌍선형 폴백
     const fb = makeCanvas(W, H);
     const fc = fb.getContext("2d")!;
@@ -561,125 +685,30 @@ function upsampleDepthJBU(
     return fb;
   }
 
-  const vertSrc = `
-    attribute vec2 a_position;
-    attribute vec2 a_texCoord;
-    varying vec2 v_texCoord;
-    void main() {
-      gl_Position = vec4(a_position, 0.0, 1.0);
-      v_texCoord = a_texCoord;
-    }
-  `;
-
-  // 5×5 Mask-Guided Joint Bilateral:
-  //   공간 가우시안(σ=1.6) × 컬러 가우시안(σ²≈0.04) × 마스크 경계 가우시안(σ²≈0.005)
-  // maskW: 마스크 값 차이가 0.07(≈18/255) 이상이면 가중치가 급격히 감소 →
-  //   전경 픽셀이 배경 depth 값을 흡수하지 못함 = 경계 누출(halo) 방지
-  const fragSrc = `
-    precision highp float;
-
-    uniform sampler2D u_depth;
-    uniform sampler2D u_guide;
-    uniform sampler2D u_mask;
-    uniform vec2 u_depthSize;
-
-    varying vec2 v_texCoord;
-
-    void main() {
-      vec3  guideCenter = texture2D(u_guide, v_texCoord).rgb;
-      float maskCenter  = texture2D(u_mask,  v_texCoord).r;
-
-      float sumDepth  = 0.0;
-      float sumWeight = 0.0;
-
-      for (int dy = -2; dy <= 2; dy++) {
-        for (int dx = -2; dx <= 2; dx++) {
-          vec2 offset  = vec2(float(dx), float(dy)) / u_depthSize;
-          vec2 sampleUV = clamp(v_texCoord + offset, vec2(0.0), vec2(1.0));
-
-          float d = texture2D(u_depth, sampleUV).r;
-          vec3  g = texture2D(u_guide, sampleUV).rgb;
-          float m = texture2D(u_mask,  sampleUV).r;
-
-          // 공간 가우시안 (σ=1.6 → 2σ²≈5.12)
-          float spatialW = exp(-float(dx*dx + dy*dy) / 5.12);
-
-          // 컬러 가우시안 (σ²≈0.04)
-          vec3  cd = guideCenter - g;
-          float colorW = exp(-dot(cd, cd) / 0.04);
-
-          // 마스크 경계 가우시안 (σ²≈0.005)
-          // 마스크 값 차이가 클수록 cross-boundary 샘플 가중치 급감 → layered 분리 효과
-          float maskDiff = abs(maskCenter - m);
-          float maskW = exp(-maskDiff * maskDiff / 0.005);
-
-          float w = spatialW * colorW * maskW;
-          sumDepth  += d * w;
-          sumWeight += w;
-        }
-      }
-
-      float outDepth = sumDepth / max(sumWeight, 1e-5);
-      gl_FragColor = vec4(outDepth, outDepth, outDepth, 1.0);
-    }
-  `;
-
-  const program = createProgram(gl, vertSrc, fragSrc);
+  const { gl, canvas: glCanvas, program } = pass;
+  glCanvas.width = W;
+  glCanvas.height = H;
   gl.useProgram(program);
   gl.viewport(0, 0, W, H);
+  bindQuadGeometry(pass);
 
-  const verts = new Float32Array([
-    -1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, -1, 1, 0, 1, 1, -1, 1, 0, 1, 1, 1, 1,
-  ]);
-  const buf = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-  gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
-
-  const stride = 4 * Float32Array.BYTES_PER_ELEMENT;
-  const posLoc = gl.getAttribLocation(program, "a_position");
-  const uvLoc = gl.getAttribLocation(program, "a_texCoord");
-  gl.enableVertexAttribArray(posLoc);
-  gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, stride, 0);
-  gl.enableVertexAttribArray(uvLoc);
-  gl.vertexAttribPointer(
-    uvLoc,
-    2,
-    gl.FLOAT,
-    false,
-    stride,
-    2 * Float32Array.BYTES_PER_ELEMENT
-  );
-
-  const depthTex = gl.createTexture();
+  const depthTex = getPassTexture(pass, "depth");
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, depthTex);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  // 깊이 맵은 커널 샘플링 시 선형 보간 사용 (커널 밖 경계값 스무딩)
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  setupClampedLinearTexture(gl);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, rawDepthCanvas);
 
-  const guideTex = gl.createTexture();
+  const guideTex = getPassTexture(pass, "guide");
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, guideTex);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  setupClampedLinearTexture(gl);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, guideCanvas);
 
   // TEXTURE2: 마스크 텍스처. 없으면 전체 흰색 1×1 텍스처(maskW = 1.0 → 기존 동작 유지)
-  const maskTex = gl.createTexture();
+  const maskTex = getPassTexture(pass, "mask");
   gl.activeTexture(gl.TEXTURE2);
   gl.bindTexture(gl.TEXTURE_2D, maskTex);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  setupClampedLinearTexture(gl);
   if (maskCanvas) {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, maskCanvas);
   } else {
@@ -699,16 +728,7 @@ function upsampleDepthJBU(
 
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 
-  const snapshot = snapshotWebGLCanvasTo2D(glCanvas);
-
-  if (depthTex) gl.deleteTexture(depthTex);
-  if (guideTex) gl.deleteTexture(guideTex);
-  if (maskTex) gl.deleteTexture(maskTex);
-  if (buf) gl.deleteBuffer(buf);
-  gl.deleteProgram(program);
-  gl.getExtension("WEBGL_lose_context")?.loseContext();
-
-  return snapshot;
+  return snapshotWebGLCanvasTo2D(glCanvas);
 }
 
 function getOrComputeJBU(
@@ -752,7 +772,50 @@ function getOrComputeJBU(
   return highRes;
 }
 
+const ALPHA_MASK_FRAGMENT_SOURCE = `
+  precision highp float;
+
+  uniform sampler2D u_depthMap;
+  uniform vec2 u_focusRange;
+  uniform float u_edgeZone;
+
+  varying vec2 v_texCoord;
+
+  void main() {
+    float depth = texture2D(u_depthMap, v_texCoord).r;
+    float distToFocus = max(u_focusRange.x - depth, depth - u_focusRange.y);
+    distToFocus = max(distToFocus, 0.0);
+    float alpha = smoothstep(0.0, max(u_edgeZone, 0.001), distToFocus);
+    gl_FragColor = vec4(1.0, 1.0, 1.0, alpha);
+  }
+`;
+
+/**
+ * focusRange/edgeZone이 이전과 같으면(예: 블러 반경만 드래그) 결과가 동일하므로 캐시한다.
+ * depthCanvas는 getOrComputeJBU 캐시가 히트하면 같은 레퍼런스를 유지하므로 WeakMap 키로 안전하다.
+ */
 function renderBlurAlphaMaskWebGL(
+  depthCanvas: HTMLCanvasElement,
+  focusRange: [number, number],
+  edgeZone: number
+): HTMLCanvasElement {
+  const cacheKey = `${focusRange[0]}|${focusRange[1]}|${edgeZone.toFixed(4)}`;
+  let byParams = alphaMaskCache.get(depthCanvas);
+  const cached = byParams?.get(cacheKey);
+  if (cached) return cached;
+
+  const result = computeBlurAlphaMaskWebGL(depthCanvas, focusRange, edgeZone);
+
+  if (!byParams) {
+    byParams = new Map();
+    alphaMaskCache.set(depthCanvas, byParams);
+  }
+  byParams.set(cacheKey, result);
+  evictOldestIfNeeded(byParams, MAX_GPU_RESULT_CACHE_ENTRIES);
+  return result;
+}
+
+function computeBlurAlphaMaskWebGL(
   depthCanvas: HTMLCanvasElement,
   focusRange: [number, number],
   edgeZone: number
@@ -760,8 +823,8 @@ function renderBlurAlphaMaskWebGL(
   const W = depthCanvas.width;
   const H = depthCanvas.height;
   const safeEdgeZone = Math.max(0.001, edgeZone);
-  const glCanvas = makeCanvas(W, H);
-  const gl = glCanvas.getContext("webgl", {
+
+  const pass = getPass("alphaMask", ALPHA_MASK_FRAGMENT_SOURCE, {
     alpha: true,
     antialias: false,
     depth: false,
@@ -769,7 +832,7 @@ function renderBlurAlphaMaskWebGL(
     preserveDrawingBuffer: true,
   });
 
-  if (!gl) {
+  if (!pass) {
     const fallback = makeCanvas(W, H);
     const fallbackCtx = fallback.getContext("2d")!;
     const depthCtx = depthCanvas.getContext("2d")!;
@@ -797,73 +860,19 @@ function renderBlurAlphaMaskWebGL(
     return fallback;
   }
 
-  const vertexSource = `
-    attribute vec2 a_position;
-    attribute vec2 a_texCoord;
-    varying vec2 v_texCoord;
-
-    void main() {
-      gl_Position = vec4(a_position, 0.0, 1.0);
-      v_texCoord = a_texCoord;
-    }
-  `;
-
-  const fragmentSource = `
-    precision highp float;
-
-    uniform sampler2D u_depthMap;
-    uniform vec2 u_focusRange;
-    uniform float u_edgeZone;
-
-    varying vec2 v_texCoord;
-
-    void main() {
-      float depth = texture2D(u_depthMap, v_texCoord).r;
-      float distToFocus = max(u_focusRange.x - depth, depth - u_focusRange.y);
-      distToFocus = max(distToFocus, 0.0);
-      float alpha = smoothstep(0.0, max(u_edgeZone, 0.001), distToFocus);
-      gl_FragColor = vec4(1.0, 1.0, 1.0, alpha);
-    }
-  `;
-
-  const program = createProgram(gl, vertexSource, fragmentSource);
+  const { gl, canvas: glCanvas, program } = pass;
+  glCanvas.width = W;
+  glCanvas.height = H;
   gl.useProgram(program);
   gl.viewport(0, 0, W, H);
   gl.clearColor(0, 0, 0, 0);
   gl.clear(gl.COLOR_BUFFER_BIT);
+  bindQuadGeometry(pass);
 
-  const vertices = new Float32Array([
-    -1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, -1, 1, 0, 1, 1, -1, 1, 0, 1, 1, 1, 1,
-  ]);
-
-  const buffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
-
-  const stride = 4 * Float32Array.BYTES_PER_ELEMENT;
-  const positionLocation = gl.getAttribLocation(program, "a_position");
-  const texCoordLocation = gl.getAttribLocation(program, "a_texCoord");
-
-  gl.enableVertexAttribArray(positionLocation);
-  gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, stride, 0);
-  gl.enableVertexAttribArray(texCoordLocation);
-  gl.vertexAttribPointer(
-    texCoordLocation,
-    2,
-    gl.FLOAT,
-    false,
-    stride,
-    2 * Float32Array.BYTES_PER_ELEMENT
-  );
-
-  const depthTexture = gl.createTexture();
+  const depthTexture = getPassTexture(pass, "depth");
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, depthTexture);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  setupClampedLinearTexture(gl);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, depthCanvas);
 
   const depthLocation = gl.getUniformLocation(program, "u_depthMap");
@@ -877,65 +886,10 @@ function renderBlurAlphaMaskWebGL(
 
   gl.drawArrays(gl.TRIANGLES, 0, 6);
 
-  const snapshot = snapshotWebGLCanvasTo2D(glCanvas);
-
-  if (depthTexture) gl.deleteTexture(depthTexture);
-  if (buffer) gl.deleteBuffer(buffer);
-  gl.deleteProgram(program);
-  gl.getExtension("WEBGL_lose_context")?.loseContext();
-
-  return snapshot;
+  return snapshotWebGLCanvasTo2D(glCanvas);
 }
-function renderLensBlurWebGL(
-  sourceCanvas: HTMLCanvasElement,
-  blurRadius: number,
-  depthData: Uint8Array,
-  depthWidth: number,
-  depthHeight: number,
-  bokehShape: number,
-  focusRange: [number, number],
-  maskCanvas: HTMLCanvasElement | null,
-  sampleCount: number
-): HTMLCanvasElement {
-  const cacheKey = [
-    sourceCanvas.width,
-    sourceCanvas.height,
-    blurRadius.toFixed(3),
-    bokehShape,
-    focusRange[0],
-    focusRange[1],
-    getCanvasCacheId(maskCanvas),
-    sampleCount,
-  ].join("|");
-  let byParams = lensBlurCache.get(depthData);
-  const cached = byParams?.get(cacheKey);
-  if (cached) return cached;
-
-  const glCanvas = makeCanvas(sourceCanvas.width, sourceCanvas.height);
-  const gl = glCanvas.getContext("webgl", {
-    alpha: false,
-    antialias: false,
-    depth: false,
-    stencil: false,
-    preserveDrawingBuffer: true,
-  });
-
-  if (!gl) {
-    throw new Error("WebGL is not available");
-  }
-
-  const vertexSource = `
-    attribute vec2 a_position;
-    attribute vec2 a_texCoord;
-    varying vec2 v_texCoord;
-
-    void main() {
-      gl_Position = vec4(a_position, 0.0, 1.0);
-      v_texCoord = a_texCoord;
-    }
-  `;
-
-  const fragmentSource = `
+function buildLensBlurFragmentSource(sampleCount: number): string {
+  return `
     precision highp float;
 
     const int SAMPLES = ${sampleCount};
@@ -1124,62 +1078,68 @@ function renderLensBlurWebGL(
       gl_FragColor = vec4(toSrgb(mixedLinear), 1.0);
     }
   `;
+}
 
-  const program = createProgram(gl, vertexSource, fragmentSource);
+function renderLensBlurWebGL(
+  sourceCanvas: HTMLCanvasElement,
+  blurRadius: number,
+  depthData: Uint8Array,
+  depthWidth: number,
+  depthHeight: number,
+  bokehShape: number,
+  focusRange: [number, number],
+  maskCanvas: HTMLCanvasElement | null,
+  sampleCount: number
+): HTMLCanvasElement {
+  const cacheKey = [
+    sourceCanvas.width,
+    sourceCanvas.height,
+    blurRadius.toFixed(3),
+    bokehShape,
+    focusRange[0],
+    focusRange[1],
+    getCanvasCacheId(maskCanvas),
+    sampleCount,
+  ].join("|");
+  let byParams = lensBlurCache.get(depthData);
+  const cached = byParams?.get(cacheKey);
+  if (cached) return cached;
+
+  const W = sourceCanvas.width;
+  const H = sourceCanvas.height;
+
+  // SAMPLES는 GLSL 상수로 셰이더에 박히므로 샘플 수(96/40)별로 별도 프로그램을 캐시한다.
+  const pass = getPass(`lensBlur:${sampleCount}`, buildLensBlurFragmentSource(sampleCount), {
+    alpha: false,
+    antialias: false,
+    depth: false,
+    stencil: false,
+    preserveDrawingBuffer: true,
+  });
+
+  if (!pass) {
+    throw new Error("WebGL is not available");
+  }
+
+  const { gl, canvas: glCanvas, program } = pass;
+  glCanvas.width = W;
+  glCanvas.height = H;
   gl.useProgram(program);
-  gl.viewport(0, 0, glCanvas.width, glCanvas.height);
+  gl.viewport(0, 0, W, H);
+  bindQuadGeometry(pass);
 
-  const vertices = new Float32Array([
-    -1, -1, 0, 0, 1, -1, 1, 0, -1, 1, 0, 1, -1, 1, 0, 1, 1, -1, 1, 0, 1, 1, 1, 1,
-  ]);
-
-  const buffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-  gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
-
-  const stride = 4 * Float32Array.BYTES_PER_ELEMENT;
-  const positionLocation = gl.getAttribLocation(program, "a_position");
-  const texCoordLocation = gl.getAttribLocation(program, "a_texCoord");
-
-  gl.enableVertexAttribArray(positionLocation);
-  gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, stride, 0);
-  gl.enableVertexAttribArray(texCoordLocation);
-  gl.vertexAttribPointer(
-    texCoordLocation,
-    2,
-    gl.FLOAT,
-    false,
-    stride,
-    2 * Float32Array.BYTES_PER_ELEMENT
-  );
-
-  const texture = gl.createTexture();
+  const texture = getPassTexture(pass, "image");
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  setupClampedLinearTexture(gl);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, sourceCanvas);
 
   // Mask-Guided JBU: 저해상도 깊이 맵을 guide 이미지 해상도로 엣지 보존 업샘플 (캐시 활용)
-  const depthCanvas = getOrComputeJBU(
-    depthData,
-    depthWidth,
-    depthHeight,
-    sourceCanvas.width,
-    sourceCanvas.height,
-    maskCanvas
-  );
-  const depthTexture = gl.createTexture();
+  const depthCanvas = getOrComputeJBU(depthData, depthWidth, depthHeight, W, H, maskCanvas);
+  const depthTexture = getPassTexture(pass, "depth");
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, depthTexture);
-  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  setupClampedLinearTexture(gl);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, depthCanvas);
 
   const imageLocation = gl.getUniformLocation(program, "u_image");
@@ -1192,7 +1152,7 @@ function renderLensBlurWebGL(
 
   gl.uniform1i(imageLocation, 0);
   gl.uniform1i(depthLocation, 1);
-  gl.uniform2f(resolutionLocation, sourceCanvas.width, sourceCanvas.height);
+  gl.uniform2f(resolutionLocation, W, H);
   gl.uniform1f(blurRadiusLocation, blurRadius);
   gl.uniform1f(thresholdLocation, 0.6);
   const [dFar, dNear] = focusRangeUiToDepthBounds(focusRange);
@@ -1208,16 +1168,7 @@ function renderLensBlurWebGL(
     lensBlurCache.set(depthData, byParams);
   }
   byParams.set(cacheKey, snapshot);
-  if (byParams.size > MAX_LENS_BLUR_CACHE_ENTRIES) {
-    const oldestKey = byParams.keys().next().value;
-    if (oldestKey) byParams.delete(oldestKey);
-  }
-
-  if (texture) gl.deleteTexture(texture);
-  if (depthTexture) gl.deleteTexture(depthTexture);
-  if (buffer) gl.deleteBuffer(buffer);
-  gl.deleteProgram(program);
-  gl.getExtension("WEBGL_lose_context")?.loseContext();
+  evictOldestIfNeeded(byParams, MAX_GPU_RESULT_CACHE_ENTRIES);
 
   return snapshot;
 }

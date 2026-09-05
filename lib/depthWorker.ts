@@ -1,28 +1,25 @@
 /// <reference lib="webworker" />
 
 import "./depthWorkerInit";
-import { env, pipeline } from "@xenova/transformers";
+import { env, pipeline } from "@huggingface/transformers";
 
 env.allowLocalModels = false;
-if (!env.backends) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (env as any).backends = {};
-}
-if (!env.backends.onnx) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (env.backends as any).onnx = {};
-}
-if (!env.backends.onnx.wasm) {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (env.backends.onnx as any).wasm = {};
-}
-env.backends.onnx.wasm.wasmPaths =
-  "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
 env.useBrowserCache = true;
+
+/**
+ * 모바일: 가볍고 빠른 V2 Small(WASM/CPU, 기존 V1 small과 동급 비용).
+ * 데스크톱 + WebGPU 지원 시: V2 Large(WebGPU) — 같은 GPU 자원을 그냥 놀리지 않고 훨씬
+ * 정교한 depth map을 뽑아낸다. Large는 CC-BY-NC-4.0(비상업)이라 상업적 재배포 시 주의.
+ */
+const SMALL_MODEL_ID = "onnx-community/depth-anything-v2-small";
+const LARGE_MODEL_ID = "onnx-community/depth-anything-v2-large";
+
+type DeviceTier = "mobile" | "desktop";
 
 type DepthWorkerRequest =
   | {
       type: "load";
+      tier?: DeviceTier;
     }
   | {
       type: "estimate";
@@ -66,25 +63,46 @@ type DepthProgress = {
 };
 
 let depthEstimatorPromise: Promise<unknown> | null = null;
+// "load" 메시지에서 정해진 뒤 이후 "estimate" 호출에서도 재사용 (getEstimator는 최초 1회만 실행)
+let resolvedTier: DeviceTier = "mobile";
 
 function post(response: DepthWorkerResponse, transfer?: Transferable[]) {
   self.postMessage(response, { transfer });
 }
 
-function getEstimator() {
-  if (!depthEstimatorPromise) {
-    depthEstimatorPromise = pipeline(
-      "depth-estimation",
-      "Xenova/depth-anything-small-hf",
-      {
-        quantized: true,
-        progress_callback: (progress: DepthProgress) => {
-          console.log("[DepthWorker] 상태:", progress);
-          post({ type: "progress", data: progress });
-        },
-      }
-    );
+function supportsWebGPU(): boolean {
+  return typeof navigator !== "undefined" && "gpu" in navigator;
+}
+
+function loadSmallModel(onProgress: (p: DepthProgress) => void) {
+  // dtype 미지정 시 wasm 디바이스는 자동으로 q8(양자화)을 쓴다 (transformers.js 기본값)
+  return pipeline("depth-estimation", SMALL_MODEL_ID, {
+    progress_callback: onProgress,
+  });
+}
+
+function getEstimator(tier: DeviceTier) {
+  if (depthEstimatorPromise) return depthEstimatorPromise;
+
+  const onProgress = (progress: DepthProgress) => {
+    console.log("[DepthWorker] 상태:", progress);
+    post({ type: "progress", data: progress });
+  };
+
+  if (tier === "desktop" && supportsWebGPU()) {
+    console.log("[DepthWorker] 데스크톱 + WebGPU 감지 → V2 Large 로드");
+    depthEstimatorPromise = pipeline("depth-estimation", LARGE_MODEL_ID, {
+      device: "webgpu",
+      dtype: "q4f16",
+      progress_callback: onProgress,
+    }).catch((e) => {
+      console.warn("[DepthWorker] WebGPU Large 모델 로드 실패, Small(WASM)로 대체:", e);
+      return loadSmallModel(onProgress);
+    });
+  } else {
+    depthEstimatorPromise = loadSmallModel(onProgress);
   }
+
   return depthEstimatorPromise;
 }
 
@@ -246,13 +264,14 @@ self.onmessage = async (event: MessageEvent<DepthWorkerRequest>) => {
 
   try {
     if (message.type === "load") {
-      await getEstimator();
+      resolvedTier = message.tier ?? "mobile";
+      await getEstimator(resolvedTier);
       post({ type: "ready" });
       return;
     }
 
     if (message.type === "estimate") {
-      const estimator = await getEstimator();
+      const estimator = await getEstimator(resolvedTier);
       const result = await (estimator as (input: string) => Promise<unknown>)(
         message.imageDataUrl
       );
